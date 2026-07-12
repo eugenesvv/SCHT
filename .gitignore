@@ -1,0 +1,63 @@
+# Python environments and caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv-*/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local configuration, secrets, and signing material
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.p12
+*.cer
+*.crt
+
+# Build and release output
+build/
+dist/
+dist-single/
+*.exe
+*.msi
+*.zip
+
+# Superseded local packaging/artwork copies (maintained versions are in
+# SCHT.spec and assets/)
+/SC Hauling Log Tracker.spec
+/logo.jpeg
+/logo.png
+
+# Editors and operating-system metadata
+.idea/
+.vscode/
+*.user
+*.suo
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Runtime data and logs (only reviewed parser fixtures are public)
+*.log
+test_data/*
+!test_data/Debug_Game.log
+!test_data/Game_4_8_five_stacked_contracts.log
+!test_data/Game_4_8_seven_sequential_contracts.log
+
+# Local OCR captures and reports can contain player/session information
+test_data/ocr_screenshots/
+test_data/ocr_screenshots_report.json
+
+# SCHT runtime files if copied into the project
+app-settings.json
+session-state.json
+contract-corrections.json
+ocr-last-failure.json
