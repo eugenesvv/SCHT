@@ -83,6 +83,7 @@ class FirstReleasePackagingRegressionTest(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "build-scht-exe.yml").read_text(encoding="utf-8")
         self.assertIn("Inno Setup 6", builder)
         self.assertIn("SCHT-Setup-%SCHT_VERSION%.exe", builder)
+        self.assertIn(r"%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe", builder)
         self.assertIn("--no-pause", (ROOT / "build_exe.bat").read_text(encoding="utf-8"))
         self.assertIn("choco install innosetup", workflow)
         self.assertIn("dist/SCHT.exe", workflow)
