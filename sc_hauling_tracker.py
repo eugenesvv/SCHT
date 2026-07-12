@@ -8311,6 +8311,16 @@ body{font-size:var(--type-ui);font-weight:var(--weight-body)}
     <footer class="confirm-footer"><button class="btn" id="contractDeleteCancel" type="button">Cancel</button><button class="btn red" id="contractDeleteConfirmBtn" type="button">Delete contract</button></footer>
   </section>
 </div>
+<div class="modal-backdrop" id="sessionResetConfirm" aria-hidden="true">
+  <section class="confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="sessionResetTitle" aria-describedby="sessionResetMessage">
+    <header class="confirm-head">
+      <span class="confirm-icon" aria-hidden="true"><svg viewBox="0 0 640 640" focusable="false"><path d="M320 64C178.6 64 64 178.6 64 320C64 461.4 178.6 576 320 576C461.4 576 576 461.4 576 320C576 178.6 461.4 64 320 64zM296 184C296 170.7 306.7 160 320 160C333.3 160 344 170.7 344 184L344 344C344 357.3 333.3 368 320 368C306.7 368 296 357.3 296 344L296 184zM320 432C337.7 432 352 446.3 352 464C352 481.7 337.7 496 320 496C302.3 496 288 481.7 288 464C288 446.3 302.3 432 320 432z"/></svg></span>
+      <div class="confirm-copy"><h3 id="sessionResetTitle">Reset this SCHT session?</h3><p id="sessionResetMessage">This clears tracked contracts, the loading checklist, the session timer, and saved contract corrections. The selected Game.log file is not changed.</p></div>
+      <button class="confirm-close" id="sessionResetClose" type="button" aria-label="Close confirmation"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false"><path d="M3 3l10 10M13 3L3 13"/></svg></button>
+    </header>
+    <footer class="confirm-footer"><button class="btn" id="sessionResetCancel" type="button">Cancel</button><button class="btn red" id="sessionResetConfirmBtn" type="button">Reset session</button></footer>
+  </section>
+</div>
 <!-- MANUAL_MAINTENANCE_REQUIRED: every user-facing feature or renamed control must update this guide, its screenshots when affected, docs/HELP_MANUAL_MAINTENANCE.md, and the manual regression test. -->
 <div class="modal-backdrop" id="infoModal" aria-hidden="true">
   <section class="info-modal" role="dialog" aria-modal="true" aria-labelledby="infoTitle">
@@ -8437,7 +8447,7 @@ const EDIT_CONTRACT_SVG=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64
 const DELETE_CONTRACT_SVG=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true" focusable="false"><path d="M232.7 69.9L224 96L128 96C110.3 96 96 110.3 96 128C96 145.7 110.3 160 128 160L512 160C529.7 160 544 145.7 544 128C544 110.3 529.7 96 512 96L416 96L407.3 69.9C402.9 56.8 390.7 48 376.9 48L263.1 48C249.3 48 237.1 56.8 232.7 69.9zM512 208L128 208L149.1 531.1C150.7 556.4 171.7 576 197 576L443 576C468.3 576 489.3 556.4 490.9 531.1L512 208z"/></svg>`;
 const statusIcon=s=>{s=(s||'').toUpperCase();if(s==='COMPLETED')return STATUS_SVGS.completed;if(['ABANDONED','FAILED','CANCELLED','DENIED','REJECTED'].includes(s))return STATUS_SVGS.denied;if(s==='ACCEPTED')return STATUS_SVGS.accepted;return STATUS_SVGS.accepted};
 const statusSubline=(status,count)=>{status=(status||'').toUpperCase();const cargo=count===1?'1 cargo row':count+' cargo rows';if(status==='COMPLETED')return cargo+' · paid';if(['ABANDONED','FAILED','CANCELLED','DENIED','REJECTED'].includes(status))return cargo+' · closed';return cargo+' · active'};
-let cache=null,refreshing=false,busy=false,toastTimer=null,editorGroup=null,editorContractedBy='',deleteMissionId='',deleteReturnFocus=null,infoReturnFocus=null,guideImageReturnFocus=null;
+let cache=null,refreshing=false,busy=false,toastTimer=null,editorGroup=null,editorContractedBy='',deleteMissionId='',deleteReturnFocus=null,resetReturnFocus=null,infoReturnFocus=null,guideImageReturnFocus=null;
 const CONTRACT_FILTER_KEY='sc-hauling-contract-filter-v1';
 const HIDE_LOADED_KEY='sc-hauling-hide-loaded-v1';
 let contractFilter=(()=>{try{return localStorage.getItem(CONTRACT_FILTER_KEY)||'all'}catch(_e){return'all'}})();
@@ -8557,7 +8567,12 @@ async function nativeExport(kind,button=null){
 $('shareBtn').addEventListener('click',event=>{event.preventDefault();event.stopPropagation();setShareMenu(!$('shareMenu').classList.contains('open'),true)});
 $('settingsBtn').addEventListener('click',event=>{event.preventDefault();event.stopPropagation();setSettingsMenu(!$('settingsMenu').classList.contains('open'),true)});
 document.querySelectorAll('#shareMenu [data-export]').forEach(button=>button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();setShareMenu(false);nativeExport(button.dataset.export,button).catch(e=>showToast(e.message||String(e),'error'))}));
-$('resetBtn').addEventListener('click',async()=>{setSettingsMenu(false);const confirmed=window.confirm('Reset this SCHT session?\n\nThis clears tracked contracts, the loading checklist, the session timer, and saved contract corrections. The selected Game.log file is not changed.');if(confirmed)await action('reset')});
+function openSessionResetConfirm(){setSettingsMenu(false);resetReturnFocus=$('resetBtn');const modal=$('sessionResetConfirm');modal.classList.add('open');modal.setAttribute('aria-hidden','false');setTimeout(()=>$('sessionResetCancel').focus(),0)}
+function closeSessionResetConfirm(){const modal=$('sessionResetConfirm');modal.classList.remove('open');modal.setAttribute('aria-hidden','true');const focusTarget=resetReturnFocus;resetReturnFocus=null;if(focusTarget&&document.contains(focusTarget))setTimeout(()=>focusTarget.focus(),0)}
+async function confirmSessionReset(){closeSessionResetConfirm();await action('reset')}
+$('resetBtn').addEventListener('click',openSessionResetConfirm);
+$('sessionResetClose').addEventListener('click',closeSessionResetConfirm);$('sessionResetCancel').addEventListener('click',closeSessionResetConfirm);$('sessionResetConfirmBtn').addEventListener('click',confirmSessionReset);
+$('sessionResetConfirm').addEventListener('pointerdown',event=>{if(event.target===$('sessionResetConfirm'))closeSessionResetConfirm()});
 $('infoBtn').addEventListener('click',openInfoWindow);
 document.addEventListener('pointerdown',event=>{if($('shareMenu').classList.contains('open')&&!$('shareMenuWrap').contains(event.target))setShareMenu(false);if($('settingsMenu').classList.contains('open')&&!$('settingsMenuWrap').contains(event.target))setSettingsMenu(false)});
 $('logPath').addEventListener('change',()=>action('set_path'));
@@ -8711,7 +8726,7 @@ $('infoClose').addEventListener('click',closeInfoWindow);$('infoDone').addEventL
 $('contractDeleteClose').addEventListener('click',closeDeleteConfirm);$('contractDeleteCancel').addEventListener('click',closeDeleteConfirm);$('contractDeleteConfirmBtn').addEventListener('click',confirmDeleteContract);
 $('infoModal').addEventListener('pointerdown',event=>{if(event.target===$('infoModal'))closeInfoWindow()});
 $('contractDeleteConfirm').addEventListener('pointerdown',event=>{if(event.target===$('contractDeleteConfirm'))closeDeleteConfirm()});
-$('contractEditor').addEventListener('pointerdown',event=>{if(event.target===$('contractEditor'))closeContractEditor()});window.addEventListener('keydown',event=>{if(event.key!=='Escape')return;if($('shareMenu').classList.contains('open')){setShareMenu(false);$('shareBtn').focus();return}if($('settingsMenu').classList.contains('open')){setSettingsMenu(false);$('settingsBtn').focus();return}if($('guideLightbox').classList.contains('open')){closeGuideImage();return}if($('infoModal').classList.contains('open')){closeInfoWindow();return}if($('contractDeleteConfirm').classList.contains('open')){closeDeleteConfirm();return}if($('contractEditor').classList.contains('open'))closeContractEditor()});
+$('contractEditor').addEventListener('pointerdown',event=>{if(event.target===$('contractEditor'))closeContractEditor()});window.addEventListener('keydown',event=>{if(event.key!=='Escape')return;if($('shareMenu').classList.contains('open')){setShareMenu(false);$('shareBtn').focus();return}if($('settingsMenu').classList.contains('open')){setSettingsMenu(false);$('settingsBtn').focus();return}if($('guideLightbox').classList.contains('open')){closeGuideImage();return}if($('infoModal').classList.contains('open')){closeInfoWindow();return}if($('sessionResetConfirm').classList.contains('open')){closeSessionResetConfirm();return}if($('contractDeleteConfirm').classList.contains('open')){closeDeleteConfirm();return}if($('contractEditor').classList.contains('open'))closeContractEditor()});
 // Editable Star Citizen commodity cargo-box palette. Values represent the visible crate/body colour in game.
 // Keep commodity keys lower-case; aliases can be added without touching the renderer.
 const COMMODITY_BOX_COLORS=Object.freeze({

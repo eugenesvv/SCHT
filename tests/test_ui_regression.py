@@ -385,7 +385,11 @@ class TopMenuRegressionTest(unittest.TestCase):
         self.assertIn('Automatic OCR', source)
         self.assertIn('id="resetBtn"', source)
         self.assertIn('Clears contracts, checklist, timer, and saved corrections for this session. Game.log is not changed.', source)
-        self.assertIn("window.confirm('Reset this SCHT session?", source)
+        self.assertIn('id="sessionResetConfirm"', source)
+        self.assertIn('id="sessionResetConfirmBtn"', source)
+        self.assertIn("function openSessionResetConfirm()", source)
+        self.assertIn("$('sessionResetCancel').focus()", source)
+        self.assertNotIn("window.confirm('Reset this SCHT session?", source)
         self.assertNotIn('id="resetBtn" data-action="reset"', source)
 
     def test_watch_and_stop_are_one_stateful_control(self):
