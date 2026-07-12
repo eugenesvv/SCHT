@@ -20,6 +20,12 @@ A local, offline-first Windows desktop application for Star Citizen Covalex carg
 
 For source development, packaging, data locations, troubleshooting, and command-line use, see the sections below. Contributors should also read [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
+## Testing development builds
+
+Active release candidates are prepared on the `dev` branch. From GitHub Actions, run **Build SCHT Windows release** manually against `dev`, then download the `SCHT-windows-release` artifact to test both the portable application and installer. Generated `.exe` files remain release artifacts and are not committed to the source tree.
+
+Before promoting `dev` to `main`, complete the [release checklist](docs/RELEASE_CHECKLIST.md). A version tag should be created only after the tested commit reaches `main`; tags trigger a fresh Windows release build.
+
 ## v1.5.66 First public test-release packaging
 
 - Rebases the public version line from the internal 3.x development series to 1.5.66.

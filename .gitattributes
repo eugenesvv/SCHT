@@ -1,0 +1,16 @@
+* text=auto
+
+*.bat text eol=crlf
+*.iss text eol=crlf
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.log text eol=lf
+
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.exe binary
