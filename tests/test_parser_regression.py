@@ -666,6 +666,44 @@ class AutomaticOcrParsingRegressionTest(unittest.TestCase):
         rows = normalized["m-shared"]["objectives"]
         self.assertEqual([row["quantity_scope"] for row in rows], ["aggregate", "aggregate"])
 
+    def test_aggregate_contracts_with_same_dropoff_share_one_logistics_section(self):
+        missions = [
+            tracker.CargoMission(
+                title="Experienced Cargo Haul", rank="Experienced", pickup="HDPC-Cassillo",
+                dropoff="Everus Harbor", commodity="Waste", scu="14", mission_id="shared-a",
+                objective_id="a-0", scu_provenance="ocr", quantity_scope="aggregate",
+            ),
+            tracker.CargoMission(
+                title="Experienced Cargo Haul", rank="Experienced", pickup="HDPC-Farnesway",
+                dropoff="Everus Harbor", commodity="Waste", scu="", mission_id="shared-a",
+                objective_id="a-1", quantity_scope="aggregate",
+            ),
+            tracker.CargoMission(
+                title="Experienced Cargo Haul", rank="Experienced", pickup="HDPC-Cassillo",
+                dropoff="Everus Harbor", commodity="Waste", scu="20", mission_id="shared-b",
+                objective_id="b-0", scu_provenance="ocr", quantity_scope="aggregate",
+            ),
+            tracker.CargoMission(
+                title="Experienced Cargo Haul", rank="Experienced", pickup="Covalex Distribution Center S1DC06",
+                dropoff="Everus Harbor", commodity="Waste", scu="", mission_id="shared-b",
+                objective_id="b-1", quantity_scope="aggregate",
+            ),
+        ]
+
+        sections = tracker.logistics_sections(missions)
+
+        self.assertEqual(len(sections), 1)
+        section = sections[0]
+        self.assertEqual(section["mode"], "aggregate_pickups")
+        self.assertEqual(section["fixed_location"], "Everus Harbor")
+        self.assertEqual(section["total"], "34")
+        self.assertEqual([load["scu_value"] for load in section["shared_loads"]], [14.0, 20.0])
+        self.assertEqual(
+            [column["location"] for column in section["columns"]],
+            ["HDPC-Cassillo", "HDPC-Farnesway", "Covalex Distribution Center S1DC06"],
+        )
+        self.assertEqual(len(section["columns"][0]["items"]), 2)
+
     def test_aggregate_ocr_validation_accepts_an_additional_visible_pickup(self):
         group = [
             tracker.CargoMission(

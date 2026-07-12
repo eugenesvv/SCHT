@@ -2578,6 +2578,11 @@ def logistics_sections(missions: Sequence[CargoMission]) -> List[dict]:
                     "total": format_scu(value),
                     "shared_scu": format_scu(value),
                     "shared_scu_value": value,
+                    "shared_loads": [{
+                        "scu": format_scu(value),
+                        "scu_value": value,
+                        "item_ids": [item["id"] for column in columns_payload for item in column["items"]],
+                    }],
                     "objective_count": len(columns_payload),
                     "route_row_count": len(aggregate_rows),
                 })
@@ -2591,6 +2596,44 @@ def logistics_sections(missions: Sequence[CargoMission]) -> List[dict]:
             if not mission.is_load_plannable():
                 continue
             active_rows.append(mission)
+
+    # Merge aggregate contracts that converge on the same drop-off while
+    # retaining each contract's own shared quantity/checklist membership.
+    merged_aggregate_sections: List[dict] = []
+    aggregate_by_dropoff: dict[str, dict] = {}
+    for section in aggregate_sections:
+        dropoff_key = str(section.get("fixed_location") or "").strip().casefold()
+        existing = aggregate_by_dropoff.get(dropoff_key)
+        if existing is None:
+            aggregate_by_dropoff[dropoff_key] = section
+            merged_aggregate_sections.append(section)
+            continue
+        columns_by_location = {
+            str(column.get("location") or "").strip().casefold(): column
+            for column in existing["columns"]
+        }
+        for column in section["columns"]:
+            location_key = str(column.get("location") or "").strip().casefold()
+            current = columns_by_location.get(location_key)
+            if current is None:
+                existing["columns"].append(column)
+                columns_by_location[location_key] = column
+            else:
+                current["items"].extend(column.get("items") or [])
+        known_pickups = {str(location).strip().casefold() for location in existing["pickup_options"]}
+        for pickup in section["pickup_options"]:
+            pickup_key = str(pickup).strip().casefold()
+            if pickup_key not in known_pickups:
+                existing["pickup_options"].append(pickup)
+                known_pickups.add(pickup_key)
+        existing["shared_loads"].extend(section.get("shared_loads") or [])
+        combined_value = float(existing.get("shared_scu_value") or 0) + float(section.get("shared_scu_value") or 0)
+        existing["total"] = format_scu(combined_value)
+        existing["shared_scu"] = format_scu(combined_value)
+        existing["shared_scu_value"] = combined_value
+        existing["objective_count"] += int(section.get("objective_count") or 0)
+        existing["route_row_count"] += int(section.get("route_row_count") or 0)
+    aggregate_sections = merged_aggregate_sections
 
     if not active_rows:
         return aggregate_sections
@@ -3937,7 +3980,7 @@ const BOX=`<svg class="cargo-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0
 function idFor(it,mode,fixed,column){return String(it.id||[mode,fixed,column,it.commodity,it.scu].join('|'))}function fmt(n){n=Number(n||0);return Number.isInteger(n)?String(n):n.toFixed(1).replace(/\.0$/,'')}
 function collect(sections){const out=[];(sections||[]).forEach(s=>(s.columns||[]).forEach(c=>(c.items||[]).forEach(it=>out.push({id:idFor(it,s.mode||'direct',s.fixed_location||'—',c.location||'—'),scu:Number(it.scu_value??it.scu??0)}))));return out}
 function stats(items){const loaded=items.filter(x=>checklist[x.id]);return{total:items.length,loaded:loaded.length,totalScu:items.reduce((n,x)=>n+x.scu,0),loadedScu:loaded.reduce((n,x)=>n+x.scu,0)}}
-function sharedStats(sections){let total=0,loaded=0;(sections||[]).forEach(section=>{if((section.mode||'')!=='aggregate_pickups')return;const value=Number(section.shared_scu_value??section.shared_scu??section.total??0);if(!value)return;const ids=[];(section.columns||[]).forEach(col=>(col.items||[]).forEach(it=>ids.push(idFor(it,section.mode||'direct',section.fixed_location||'—',col.location||'—'))));total+=value;if(ids.length&&ids.every(id=>checklist[id]))loaded+=value});return{total,loaded}}
+function sharedStats(sections){let total=0,loaded=0;(sections||[]).forEach(section=>{if((section.mode||'')!=='aggregate_pickups')return;let loads=Array.isArray(section.shared_loads)?section.shared_loads:[];if(!loads.length){const ids=[];(section.columns||[]).forEach(col=>(col.items||[]).forEach(it=>ids.push(idFor(it,section.mode||'direct',section.fixed_location||'—',col.location||'—'))));loads=[{scu_value:Number(section.shared_scu_value??section.shared_scu??section.total??0),item_ids:ids}]}loads.forEach(load=>{const value=Number(load.scu_value??load.scu??0),ids=load.item_ids||[];if(!value)return;total+=value;if(ids.length&&ids.every(id=>checklist[id]))loaded+=value})});return{total,loaded}}
 function applyOverlayView(){document.body.classList.add('compact');$('overlayHideLoadedBtn').classList.toggle('active',!!overlayView.hide_loaded);$('overlayHideLoadedBtn').textContent=overlayView.hide_loaded?'Show loaded':'Hide loaded'}
 function resetDocumentViewport(){try{window.scrollTo(0,0)}catch(_e){}document.documentElement.scrollTop=0;document.body.scrollTop=0}
 function syncChecklistRows(){document.querySelectorAll('.cargo-row[data-id]').forEach(row=>{const loaded=!!checklist[row.dataset.id];row.classList.toggle('loaded',loaded);row.setAttribute('aria-checked',loaded?'true':'false')})}
@@ -3945,7 +3988,7 @@ function buildBoardMarkup(sections){
   if(!sections.length)return '<div class="empty">No active accepted cargo.<br>Accept or scan a hauling contract to populate this overlay.</div>';
   const markup=sections.map(section=>{
     const mode=section.mode||'direct',fixed=section.fixed_location||'—';
-    let label='Direct route';if(mode==='single_pickup')label='Shared pickup';else if(mode==='single_dropoff')label='Shared drop-off';else if(mode==='aggregate_pickups')label='Shared quantity';
+    let label='Direct route';if(mode==='single_pickup')label='Shared pickup';else if(mode==='single_dropoff'||mode==='aggregate_pickups')label='Shared drop-off';
     const routes=(section.columns||[]).map(col=>{
       const all=(col.items||[]).map(it=>({it,id:idFor(it,mode,fixed,col.location||'—'),scu:Number(it.scu_value??it.scu??0)}));
       const routeStats=stats(all);
@@ -8751,7 +8794,7 @@ async function syncChecklist(action,id='',checked=false){try{const payload={acti
 function formatChecklistScu(value){value=Number(value||0);return Number.isInteger(value)?String(value):value.toFixed(1).replace(/\.0$/,'')}
 function logisticsItemId(it,mode,fixed,column){return String(it.id||[mode,fixed,column,it.commodity,it.scu].join('|'))}
 function checklistStats(items){const loaded=items.filter(it=>loadingChecklist[it.id]);return{total:items.length,loaded:loaded.length,totalScu:items.reduce((n,it)=>n+Number(it.scu||0),0),loadedScu:loaded.reduce((n,it)=>n+Number(it.scu||0),0)}}
-function sharedChecklistStats(sections){let total=0,loaded=0;(sections||[]).forEach(section=>{if((section.mode||'')!=='aggregate_pickups')return;const value=Number(section.shared_scu_value??section.shared_scu??section.total??0);if(!value)return;const ids=[];(section.columns||[]).forEach(col=>(col.items||[]).forEach(it=>ids.push(logisticsItemId(it,section.mode||'direct',section.fixed_location||'—',col.location||'—'))));total+=value;if(ids.length&&ids.every(id=>loadingChecklist[id]))loaded+=value});return{total,loaded}}
+function sharedChecklistStats(sections){let total=0,loaded=0;(sections||[]).forEach(section=>{if((section.mode||'')!=='aggregate_pickups')return;let loads=Array.isArray(section.shared_loads)?section.shared_loads:[];if(!loads.length){const ids=[];(section.columns||[]).forEach(col=>(col.items||[]).forEach(it=>ids.push(logisticsItemId(it,section.mode||'direct',section.fixed_location||'—',col.location||'—'))));loads=[{scu_value:Number(section.shared_scu_value??section.shared_scu??section.total??0),item_ids:ids}]}loads.forEach(load=>{const value=Number(load.scu_value??load.scu??0),ids=load.item_ids||[];if(!value)return;total+=value;if(ids.length&&ids.every(id=>loadingChecklist[id]))loaded+=value})});return{total,loaded}}
 function updateChecklistHeader(items,sections){
   const stats=checklistStats(items),shared=sharedChecklistStats(sections),complete=stats.total>0&&stats.loaded===stats.total;
   $('checklistProgress').textContent=`${stats.loaded}/${stats.total} loaded`;
@@ -8796,7 +8839,7 @@ function renderLogistics(data){
       title='Drop off location (shared)';
       desc='Cargo from these pickups converges here';
     }else if(mode==='aggregate_pickups'){
-      title='Drop off location (shared total)';
+      title='Drop off location (shared)';
       desc='Collect this commodity at the listed pickup locations';
     }
     const sectionItems=[];

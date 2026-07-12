@@ -215,6 +215,14 @@ class SharedPickupLogisticsRegressionTest(unittest.TestCase):
         self.assertNotIn('"location": "Any listed pickup"', source)
         self.assertNotIn('Any pickup:', source)
 
+    def test_shared_dropoff_labels_match_in_board_and_overlay(self):
+        source = Path(tracker.__file__).read_text(encoding="utf-8")
+        self.assertIn("title='Drop off location (shared)'", source)
+        self.assertNotIn("Drop off location (shared total)", source)
+        self.assertIn("mode==='single_dropoff'||mode==='aggregate_pickups'", source)
+        self.assertNotIn("label='Shared quantity'", source)
+        self.assertIn("section.shared_loads", source)
+
     def test_toast_stays_visible_above_contract_editor(self):
         source = Path(tracker.__file__).read_text(encoding="utf-8")
         self.assertIn('.modal-backdrop{position:fixed;inset:0;z-index:300;', source)
