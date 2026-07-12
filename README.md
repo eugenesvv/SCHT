@@ -1,6 +1,6 @@
 # SCHT — Star Citizen Hauling Tracker
 
-![SCHT logo](https://raw.githubusercontent.com/eugenesvv/SCHT/dev/assets/sc_hauling_logo_full.png)
+![SCHT logo](assets/sc_hauling_logo_full.png)
 
 SCHT is a local Windows companion for Star Citizen hauling contracts. It reads your `Game.log`, organizes accepted contracts, tracks cargo and payouts, and provides a loading checklist with an optional compact overlay.
 
