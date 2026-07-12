@@ -512,8 +512,9 @@ class FirstReleaseDesktopLayoutRegressionTest(unittest.TestCase):
         source = Path(tracker.__file__).read_text(encoding="utf-8")
         self.assertEqual(tracker.MAIN_WINDOW_PREFERRED_MIN_WIDTH, tracker.MAIN_WINDOW_HARD_MIN_WIDTH)
         self.assertIn("min_size=min_window_size", source)
-        self.assertIn("grid-template-rows:auto auto 28px", source)
+        self.assertIn("grid-template-rows:auto auto minmax(28px,1fr)", source)
         self.assertIn("align-content:start", source)
+        self.assertIn(".footer{height:28px;align-self:end", source)
         self.assertNotIn('<section class="workspace-tools">', source)
 
     def test_first_run_notification_is_not_rendered(self):
