@@ -508,6 +508,20 @@ class FirstReleaseDesktopLayoutRegressionTest(unittest.TestCase):
         self.assertIn('@media(max-width:1120px){.topbar{grid-template-columns:200px minmax(190px,1fr)}', source)
         self.assertNotIn('@media(max-width:1290px){.topbar', source)
 
+    def test_dashboard_starts_at_resize_minimum_without_stretched_top_gap(self):
+        source = Path(tracker.__file__).read_text(encoding="utf-8")
+        self.assertEqual(tracker.MAIN_WINDOW_PREFERRED_MIN_WIDTH, tracker.MAIN_WINDOW_HARD_MIN_WIDTH)
+        self.assertIn("min_size=min_window_size", source)
+        self.assertIn("grid-template-rows:auto auto 28px", source)
+        self.assertIn("align-content:start", source)
+        self.assertNotIn('<section class="workspace-tools">', source)
+
+    def test_first_run_notification_is_not_rendered(self):
+        source = Path(tracker.__file__).read_text(encoding="utf-8")
+        self.assertNotIn('id="onboarding"', source)
+        self.assertNotIn("function updateOnboarding", source)
+        self.assertNotIn("updateOnboarding(data)", source)
+
     def test_help_explains_installer_and_no_python_requirement(self):
         source = Path(tracker.__file__).read_text(encoding="utf-8")
         self.assertIn('use <strong>SCHT-Setup</strong>', source)
