@@ -88,6 +88,9 @@ class FirstReleasePackagingRegressionTest(unittest.TestCase):
         self.assertIn("choco install innosetup", workflow)
         self.assertIn("dist/SCHT.exe", workflow)
         self.assertIn("dist/SCHT-Setup-*.exe", workflow)
+        self.assertIn("dist/SHA256SUMS.txt", workflow)
+        self.assertIn("gh release create", workflow)
+        self.assertIn("contents: write", workflow)
 
     def test_standalone_exe_bundles_python_for_players(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

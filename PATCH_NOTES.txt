@@ -1,10 +1,12 @@
-SCHT 1.5.66 first public test-release packaging patch
+SCHT 1.5.66 — first public test release
 
-- Rebased the visible/public version from 3.5.66 to 1.5.66.
-- Opens the main window wider and keeps the primary toolbar on the Game.log row at normal desktop widths.
-- Renamed AppData to %LOCALAPPDATA%\SCHT with automatic migration from the legacy folder.
-- Added an Inno Setup installer and clean uninstaller for app files, shortcuts, current AppData, and legacy AppData.
-- Added local and GitHub builders for both SCHT.exe and SCHT-Setup-1.5.66.exe.
-- Clarified that end users do not need Python; the standalone EXE bundles its runtime.
+- Tracks accepted, completed, and abandoned Star Citizen hauling contracts from Game.log.
+- Adds a session dashboard, Logistics Board, loading checklist, compact overlay, timer, filters, and CSV/HTML exports.
+- Includes OCR-assisted contract detail recovery with manual review and correction tools.
+- Provides a per-user Windows installer and clean uninstaller.
+- Stores app-owned data under %LOCALAPPDATA%\SCHT and migrates the legacy data folder automatically.
+- Ships as a standalone Windows application; Python is not required.
 
-Apply these files over SCHT 3.5.66, rebuild SCHT.exe, then run build_installer.bat on Windows with Inno Setup 6 installed.
+Recommended download: SCHT-Setup-1.5.66.exe
+
+The portable SCHT.exe is also provided for users who prefer not to install the application. SHA256SUMS.txt contains checksums for both downloads.
