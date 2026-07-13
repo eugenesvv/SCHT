@@ -4,13 +4,13 @@
 
 SCHT is a local Windows companion for Star Citizen hauling contracts. It reads your `Game.log`, organizes accepted contracts, tracks cargo and payouts, and provides a loading checklist with an optional compact overlay.
 
-> **Public test release:** SCHT 1.5.66. Please report unexpected behavior after removing personal information from screenshots and log excerpts.
+> **Public test release:** SCHT 1.5.67. Please report unexpected behavior after removing personal information from screenshots and log excerpts.
 
 ## Download
 
 ### Recommended: Windows installer
 
-[**Download SCHT-Setup-1.5.66.exe**](https://github.com/eugenesvv/SCHT/releases/latest/download/SCHT-Setup-1.5.66.exe)
+[**Download SCHT-Setup-1.5.67.exe**](https://github.com/eugenesvv/SCHT/releases/latest/download/SCHT-Setup-1.5.67.exe)
 
 The installer adds SCHT for the current Windows user, creates a Start Menu shortcut, offers an optional desktop shortcut, and provides normal Windows uninstallation. Administrator access is normally not required.
 
@@ -21,6 +21,13 @@ The installer adds SCHT for the current Windows user, creates a Start Menu short
 The portable build runs without installation. Deleting it does not remove SCHT settings or session data stored in AppData.
 
 [View release notes and checksums](https://github.com/eugenesvv/SCHT/releases/latest)
+
+## What's new in 1.5.67
+
+- Cleaner dashboard startup sizing, spacing, footer placement, and reset confirmation
+- Improved shared drop-off grouping and clearer pickup/drop-off labels in the dashboard and overlay
+- Smaller, better-contained OCR progress notifications
+- Reliable completion tracking when several stacked hauling missions finish simultaneously
 
 ## System requirements
 
