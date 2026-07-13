@@ -4197,9 +4197,9 @@ class OcrNotificationWindow:
                 progress_color = {"success": green, "warning": amber, "error": red}.get(data["tone"], blue) if data["terminal"] else blue
                 try:
                     rounded_rect(1, 1, width - 1, height - 1, 18, fill=bg, outline=border, width=1)
-                    canvas.create_text(20, 18, anchor="w", text=data["label"], fill=label, font=("Segoe UI", 9, "bold"))
-                    canvas.create_text(20, 44, anchor="w", text=data["status"], fill=title_color, font=("Segoe UI", 16, "bold"))
-                    canvas.create_text(20, 67, anchor="w", text=data["detail"][:76], fill=detail_color, font=("Segoe UI", 10))
+                    canvas.create_text(20, 18, anchor="w", text=data["label"], fill=label, font=("Segoe UI", 8, "bold"))
+                    canvas.create_text(20, 43, anchor="w", text=data["status"], fill=title_color, font=("Segoe UI", 13, "bold"))
+                    canvas.create_text(20, 66, anchor="w", text=data["detail"][:76], fill=detail_color, font=("Segoe UI", 9))
                     cx, cy = width - 24, 20
                     canvas.create_line(cx - 5, cy - 5, cx + 5, cy + 5, fill=label, width=2)
                     canvas.create_line(cx + 5, cy - 5, cx - 5, cy + 5, fill=label, width=2)
@@ -4209,8 +4209,17 @@ class OcrNotificationWindow:
                     if progress > 0:
                         fill_right = left + int((right - left) * (progress / 100.0))
                         rounded_rect(left, top, max(left + 8, fill_right), bottom, 4, fill=progress_color, outline=progress_color)
-                    canvas.create_text(width - 38, 95, anchor="center", text=f"{progress}%", fill=progress_color, font=("Segoe UI", 10, "bold"))
-                    canvas.create_text(20, 122, anchor="w", text=data["note"][:82], fill=note_color, font=("Segoe UI", 10, "bold"))
+                    canvas.create_text(width - 38, 95, anchor="center", text=f"{progress}%", fill=progress_color, font=("Segoe UI", 9, "bold"))
+                    canvas.create_text(
+                        20,
+                        121,
+                        anchor="w",
+                        text=data["note"],
+                        width=width - 42,
+                        justify="left",
+                        fill=note_color,
+                        font=("Segoe UI", 9, "bold"),
+                    )
                 except Exception:
                     pass
 
@@ -4491,8 +4500,8 @@ class OcrNotificationWindow:
                             fill_round_rect(hdc, bar_left, bar_top, max(bar_left + 8, fill_right), bar_bottom, active_color, active_color, 8, 1)
                         percent_rect = RECT(width - 72, 84, width - 18, 105)
                         draw_text(hdc, f"{progress}%", percent_rect, active_color, fonts["percent"], DT_CENTER | DT_SINGLELINE)
-                        note_rect = RECT(20, 114, width - 20, 136)
-                        draw_text(hdc, model.get("note") or "", note_rect, colors["note"], fonts["note"], DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS)
+                        note_rect = RECT(20, 108, width - 20, 140)
+                        draw_text(hdc, model.get("note") or "", note_rect, colors["note"], fonts["note"], DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS)
                     finally:
                         gdi32.DeleteObject(bg_brush)
                         user32.EndPaint(hwnd, ctypes.byref(ps))
@@ -4502,13 +4511,13 @@ class OcrNotificationWindow:
                     return 0
                 return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
-            fonts["label"] = gdi32.CreateFontW(-13, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI")
-            fonts["title"] = gdi32.CreateFontW(-22, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI")
-            fonts["detail"] = gdi32.CreateFontW(-15, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI")
+            fonts["label"] = gdi32.CreateFontW(-11, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI")
+            fonts["title"] = gdi32.CreateFontW(-18, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI")
+            fonts["detail"] = gdi32.CreateFontW(-13, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI")
             fonts["stage"] = gdi32.CreateFontW(-13, 0, 0, 0, 600, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI")
             fonts["close"] = gdi32.CreateFontW(-20, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI")
-            fonts["percent"] = gdi32.CreateFontW(-15, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI")
-            fonts["note"] = gdi32.CreateFontW(-14, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI")
+            fonts["percent"] = gdi32.CreateFontW(-13, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI")
+            fonts["note"] = gdi32.CreateFontW(-12, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI")
             wc = WNDCLASS()
             wc.lpfnWndProc = wndproc
             wc.hInstance = hinst

@@ -329,6 +329,24 @@ class AutomaticOcrUiRegressionTest(unittest.TestCase):
         self.assertIn('def _run_native_windows(self)', source)
         self.assertIn('CreateWindowExW', source)
         self.assertIn('def capture_star_citizen_window(self)', source)
+
+    def test_ocr_notification_instruction_stays_inside_the_card(self):
+        source = Path(tracker.__file__).read_text(encoding="utf-8")
+        self.assertIn('width=width - 42,', source)
+        self.assertIn('font=("Segoe UI", 9, "bold")', source)
+        self.assertIn('note_rect = RECT(20, 108, width - 20, 140)', source)
+        self.assertIn('DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS', source)
+        self.assertIn('fonts["note"] = gdi32.CreateFontW(-12,', source)
+
+    def test_ocr_notification_uses_compact_typography(self):
+        source = Path(tracker.__file__).read_text(encoding="utf-8")
+        self.assertIn('font=("Segoe UI", 8, "bold")', source)
+        self.assertIn('font=("Segoe UI", 13, "bold")', source)
+        self.assertIn('font=("Segoe UI", 9)', source)
+        self.assertIn('fonts["label"] = gdi32.CreateFontW(-11,', source)
+        self.assertIn('fonts["title"] = gdi32.CreateFontW(-18,', source)
+        self.assertIn('fonts["detail"] = gdi32.CreateFontW(-13,', source)
+        self.assertIn('fonts["percent"] = gdi32.CreateFontW(-13,', source)
         self.assertIn('Star Citizen is not the foreground application', source)
         self.assertIn('SetProcessDpiAwarenessContext', source)
         self.assertIn('SetProcessDPIAware', source)
