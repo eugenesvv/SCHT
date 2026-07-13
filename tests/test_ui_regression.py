@@ -22,6 +22,19 @@ class OverlayUiRegressionTest(unittest.TestCase):
         self.assertIn('Hide loaded', html)
         self.assertIn('Show loaded', html)
 
+    def test_overlay_labels_route_directions_and_reuses_contract_arrows(self):
+        html = tracker.OVERLAY_HTML
+        self.assertNotIn("let label='Direct route'", html)
+        self.assertIn("fixedKind==='pickup'?'PICK UP LOCATION':'DROP OFF LOCATION'", html)
+        self.assertIn("shared?' (SHARED)':''", html)
+        self.assertIn("const columnKind=fixedKind==='pickup'?'dropoff':'pickup'", html)
+        self.assertIn('const LOCATION_SVGS=Object.freeze({', html)
+        self.assertIn('class="overlay-location ${fixedKind}-route"', html)
+        self.assertIn('class="overlay-location ${columnKind}-route"', html)
+        self.assertIn('.overlay-location.pickup-route .route-icon{color:#6f9bd1}', html)
+        self.assertIn('.overlay-location.dropoff-route .route-icon{color:#8979d8}', html)
+        self.assertIn('.overlay-location .location-text{display:block;min-width:0;margin-top:0!important;color:inherit!important;font:inherit!important;', html)
+
 
 class MainWindowMaximizeRegressionTest(unittest.TestCase):
     def test_maximize_uses_work_area_and_restores_previous_rect(self):
