@@ -2046,26 +2046,34 @@ def parse_block(source_line: int, block_lines: Sequence[str]) -> List[CargoMissi
     return missions
 
 
-def parse_completion_block(source_line: int, block_lines: Sequence[str]) -> Optional[CompletionEvent]:
+def parse_completion_block(
+    source_line: int,
+    block_lines: Sequence[str],
+    trigger_line: str = "",
+) -> Optional[CompletionEvent]:
     raw = "\n".join(block_lines)
     plain = strip_markup(raw)
     lower = plain.lower()
+    # Completion events can arrive as a same-millisecond stack. The surrounding
+    # context may therefore contain several EndMission records; anchor an exact
+    # lifecycle event to the line that caused this block to be created.
+    end_line = trigger_line if "<endmission>" in trigger_line.lower() else ""
     end_match = re.search(
         r"<EndMission>.*?MissionId\s*\[([^\]]+)\].*?CompletionType\s*\[([^\]]+)\].*?Reason\s*\[([^\]]*)\]",
-        raw,
+        end_line or raw,
         re.I | re.S,
     )
     if end_match:
         mission_id = end_match.group(1).strip()
         completion_type = end_match.group(2).strip()
         reason = end_match.group(3).strip()
-        timestamp = next((extract_timestamp(l) for l in block_lines if "<EndMission>" in l and extract_timestamp(l)), "")
+        timestamp = extract_timestamp(end_line) or next((extract_timestamp(l) for l in block_lines if "<EndMission>" in l and extract_timestamp(l)), "")
         return CompletionEvent(
             mission_id=mission_id,
             title="",
             amount_auec=None,
             timestamp=timestamp,
-            raw=raw,
+            raw=end_line or raw,
             source_line=source_line,
             confidence=95 if mission_id else 45,
             is_completion=completion_type.lower() == "complete",
@@ -2186,7 +2194,8 @@ def parse_completion_events(lines: Sequence[str]) -> List[CompletionEvent]:
     events: List[CompletionEvent] = []
     seen = set()
     for source_line, block in build_completion_blocks(lines):
-        event = parse_completion_block(source_line, block)
+        trigger_line = lines[source_line - 1] if 0 < source_line <= len(lines) else ""
+        event = parse_completion_block(source_line, block, trigger_line)
         if not event:
             continue
         key = event.key()

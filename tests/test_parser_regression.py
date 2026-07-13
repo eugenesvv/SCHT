@@ -205,6 +205,23 @@ class MissionFirstParsingRegressionTest(unittest.TestCase):
         self.assertTrue(tracker.group_completed(tracker.contract_groups(missions)[0]))
         self.assertIsNone(tracker.group_payout(tracker.contract_groups(missions)[0]))
 
+    def test_same_millisecond_endmission_stack_keeps_every_mission_id(self):
+        mission_ids = [
+            f"{index:08d}-1111-4222-8333-444444444444"
+            for index in range(1, 7)
+        ]
+        lines = []
+        for mission_id in mission_ids:
+            lines.extend([
+                f"<2026-07-13T06:53:15.249Z> [Notice] <MissionEnded> Received MissionEnded push message for: mission_id {mission_id} - mission_state MISSION_STATE_COMPLETED",
+                f"<2026-07-13T06:53:15.249Z> [Notice] <EndMission> Ending mission for player. MissionId[{mission_id}] CompletionType[Complete] Reason[Mission Ended]",
+            ])
+
+        events = tracker.parse_completion_events(lines)
+
+        self.assertEqual([event.mission_id for event in events], mission_ids)
+        self.assertTrue(all(event.is_completion for event in events))
+
     def test_marker_only_stims_keeps_scu_and_payout_unknown(self):
         mission_id = "cccccccc-73b2-42b4-bd18-4d02844ef18c"
         missions = self.parse_lines([
