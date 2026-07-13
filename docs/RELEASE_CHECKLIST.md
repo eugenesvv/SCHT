@@ -7,13 +7,13 @@ Use this checklist on the `dev` branch before promoting a tested version to `mai
 - [ ] Confirm the **Tests** workflow passes on `dev`.
 - [ ] Run the **Build SCHT Windows release** workflow manually from `dev`.
 - [ ] Download the `SCHT-windows-release` artifact.
-- [ ] Confirm it contains `SCHT.exe` and `SCHT-Setup-1.5.66.exe`.
-- [ ] Confirm both files show product version 1.5.66 in Windows file properties.
+- [ ] Confirm it contains `SCHT.exe` and `SCHT-Setup-1.5.67.exe`.
+- [ ] Confirm both files show product version 1.5.67 in Windows file properties.
 
 ## Portable application test
 
 - [ ] Start `SCHT.exe` on a Windows account without Python on `PATH`.
-- [ ] Confirm the header shows version 1.5.66.
+- [ ] Confirm the header shows version 1.5.67.
 - [ ] Select a sanitized test `Game.log`, scan it, and start/stop live watching.
 - [ ] Exercise the Contract Log, Logistics Board, overlay, checklist, filters, timer, and contract editor.
 - [ ] Test CSV and HTML exports.
@@ -22,7 +22,7 @@ Use this checklist on the `dev` branch before promoting a tested version to `mai
 
 ## Installer test
 
-- [ ] Install `SCHT-Setup-1.5.66.exe` as a standard user.
+- [ ] Install `SCHT-Setup-1.5.67.exe` as a standard user.
 - [ ] Confirm Start Menu and optional desktop shortcuts launch the installed copy.
 - [ ] Upgrade over an earlier SCHT installation and confirm legacy AppData migration preserves existing settings.
 - [ ] Confirm only one desktop instance can run at a time.

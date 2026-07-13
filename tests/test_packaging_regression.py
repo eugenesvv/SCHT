@@ -54,7 +54,7 @@ class PortableExePackagingRegressionTest(unittest.TestCase):
 
 class FirstReleasePackagingRegressionTest(unittest.TestCase):
     def test_public_version_is_rebased_to_one(self):
-        self.assertEqual("1.5.66", tracker.APP_VERSION)
+        self.assertEqual("1.5.67", tracker.APP_VERSION)
         self.assertTrue(tracker.APP_VERSION.startswith("1."))
 
     def test_windows_appdata_uses_scht_and_migrates_legacy_folder(self):

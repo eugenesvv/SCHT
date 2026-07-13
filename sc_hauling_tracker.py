@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SC Hauling Log Tracker 1.5.66
+SC Hauling Log Tracker 1.5.67
 ----------------------------
 Offline parser/GUI for Star Citizen hauling missions in Game.log.
 
@@ -10,6 +10,7 @@ profit, elapsed timers, mission profit/hr, and session profit/hr.
 
 No internet connection is required at runtime. Source desktop mode uses pywebview; packaged builds include it.
 
+1.5.67 polishes the dashboard and overlay layout, clarifies shared route handling, refines OCR notifications, and preserves every completion in same-millisecond mission stacks.
 1.5.66 prepares the first public test release with a wider desktop layout, SCHT AppData migration, a clean Windows installer, and standalone packaging that requires no end-user Python installation.
 3.5.66 extends the Help guide navigation rail to the full guide height so its darker background remains visually continuous while the manual scrolls.
 3.5.65 replaces the placeholder Help window with an illustrated offline user guide and adds a manual-maintenance contract for future features.
@@ -76,7 +77,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
 APP_NAME = "SC Hauling Log Tracker"
-APP_VERSION = "1.5.66"
+APP_VERSION = "1.5.67"
 APP_DATA_FOLDER = "SCHT"
 LEGACY_APP_DATA_FOLDERS = ("SC Hauling Log Tracker",)
 MAIN_WINDOW_LAYOUT_VERSION = 4
@@ -8318,7 +8319,7 @@ body{font-size:var(--type-ui);font-weight:var(--weight-body)}
   <div class="app-viewport" id="appViewport">
 <div class="app">
   <header class="topbar">
-    <section class="brand"><div class="mark"><img src="/assets/sc_hauling_logo_mark.png" alt="SCHT logo"></div><div class="brand-copy"><h1>SCHT</h1><div class="brand-subtitle">SC Hauling Tracker</div><small id="version">v1.5.66</small></div></section>
+    <section class="brand"><div class="mark"><img src="/assets/sc_hauling_logo_mark.png" alt="SCHT logo"></div><div class="brand-copy"><h1>SCHT</h1><div class="brand-subtitle">SC Hauling Tracker</div><small id="version">v1.5.67</small></div></section>
     <div class="pathline"><label for="logPath">Game log</label><input id="logPath" spellcheck="false" autocomplete="off"></div>
     <nav class="actions" aria-label="App controls">
       <button class="btn" id="browseBtn" title="Choose a Star Citizen Game.log file">Choose Log</button><button class="btn" id="scanBtn" data-action="scan" title="Read the selected Game.log now">Scan Log</button><button class="btn primary" id="watchBtn" data-action="watch" title="Start monitoring Game.log for new contract events">Start Watch</button>
@@ -8494,7 +8495,7 @@ body{font-size:var(--type-ui);font-weight:var(--weight-body)}
         </main>
       </div>
     </div>
-    <footer class="info-footer"><small id="infoVersion">SCHT v1.5.66</small><button class="btn primary" id="infoDone" type="button">Close</button></footer>
+    <footer class="info-footer"><small id="infoVersion">SCHT v1.5.67</small><button class="btn primary" id="infoDone" type="button">Close</button></footer>
     <div class="guide-lightbox" id="guideLightbox" aria-hidden="true"><button class="guide-lightbox-close" id="guideLightboxClose" type="button" aria-label="Close enlarged image"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false"><path d="M3 3l10 10M13 3L3 13"/></svg></button><div class="guide-lightbox-frame"><img id="guideLightboxImage" alt=""><p id="guideLightboxCaption"></p></div></div>
   </section>
 </div>
@@ -8535,7 +8536,7 @@ function setSettingsMenu(open,focusFirst=false){const menu=$('settingsMenu'),but
 function closeTopMenus(){setShareMenu(false);setSettingsMenu(false)}
 function openGuideImage(button){if(!button)return;guideImageReturnFocus=button;const src=button.dataset.guideImage||button.querySelector('img')?.src||'';const caption=button.dataset.guideCaption||button.querySelector('img')?.alt||'SCHT guide image';$('guideLightboxImage').src=src;$('guideLightboxImage').alt=caption;$('guideLightboxCaption').textContent=caption;const viewer=$('guideLightbox');viewer.classList.add('open');viewer.setAttribute('aria-hidden','false');setTimeout(()=>$('guideLightboxClose').focus(),0)}
 function closeGuideImage(restoreFocus=true){const viewer=$('guideLightbox');viewer.classList.remove('open');viewer.setAttribute('aria-hidden','true');$('guideLightboxImage').removeAttribute('src');const focusTarget=guideImageReturnFocus;guideImageReturnFocus=null;if(restoreFocus&&focusTarget&&document.contains(focusTarget))setTimeout(()=>focusTarget.focus(),0)}
-function openInfoWindow(){closeTopMenus();infoReturnFocus=document.activeElement;const version=cache?.version||'1.5.66';$('infoVersion').textContent='SCHT v'+version;const modal=$('infoModal');modal.classList.add('open');modal.setAttribute('aria-hidden','false');$('infoBody').scrollTop=0;setTimeout(()=>$('guideQuickStartLink').focus(),0)}
+function openInfoWindow(){closeTopMenus();infoReturnFocus=document.activeElement;const version=cache?.version||'1.5.67';$('infoVersion').textContent='SCHT v'+version;const modal=$('infoModal');modal.classList.add('open');modal.setAttribute('aria-hidden','false');$('infoBody').scrollTop=0;setTimeout(()=>$('guideQuickStartLink').focus(),0)}
 function closeInfoWindow(){if($('guideLightbox').classList.contains('open'))closeGuideImage(false);const modal=$('infoModal');modal.classList.remove('open');modal.setAttribute('aria-hidden','true');const focusTarget=infoReturnFocus;infoReturnFocus=null;if(focusTarget&&document.contains(focusTarget))setTimeout(()=>focusTarget.focus(),0)}
 function setBusy(value){busy=value;document.querySelectorAll('[data-action]').forEach(b=>b.disabled=value)}
 async function action(name){if(busy)return;setBusy(true);try{const path=$('logPath').value;const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:name,log_path:path})});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'Action failed');render(j.state||await fetchState())}catch(e){showToast(e.message||String(e),'error')}finally{setBusy(false);if(cache)updateControls(cache)}}
@@ -8942,7 +8943,7 @@ refresh();setInterval(refresh,1000);
 
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "SCHaulingWeb/1.5.66"
+        server_version = "SCHaulingWeb/1.5.67"
 
         def log_message(self, fmt, *args):
             # Keep terminal clean unless there is a debugging need.

@@ -1,12 +1,13 @@
-SCHT 1.5.66 — first public test release
+SCHT 1.5.67 — interface and stacked-mission reliability patch
 
-- Tracks accepted, completed, and abandoned Star Citizen hauling contracts from Game.log.
-- Adds a session dashboard, Logistics Board, loading checklist, compact overlay, timer, filters, and CSV/HTML exports.
-- Includes OCR-assisted contract detail recovery with manual review and correction tools.
-- Provides a per-user Windows installer and clean uninstaller.
-- Stores app-owned data under %LOCALAPPDATA%\SCHT and migrates the legacy data folder automatically.
-- Ships as a standalone Windows application; Python is not required.
+- Starts the dashboard at its supported minimum width and removes the unused first-run notification and excess top spacing.
+- Keeps the dashboard status footer pinned to the bottom and restores the themed reset-session confirmation.
+- Merges active contracts that share a drop-off into one Logistics Board group while preserving each contract's cargo quantity.
+- Clarifies pickup and drop-off labels in the dashboard and overlay, including shared-route labels and directional arrows.
+- Refines OCR progress notification typography and wrapping so messages remain inside the notification card.
+- Correctly completes every mission when several stacked hauling contracts finish in the same millisecond.
+- Fixes GitHub Actions dependency caching so regression tests run reliably on every push.
 
-Recommended download: SCHT-Setup-1.5.66.exe
+Recommended download: SCHT-Setup-1.5.67.exe
 
-The portable SCHT.exe is also provided for users who prefer not to install the application. SHA256SUMS.txt contains checksums for both downloads.
+The portable SCHT.exe is also provided. SHA256SUMS.txt contains checksums for both downloads.

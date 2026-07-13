@@ -2,7 +2,7 @@
 
 ## Supported version
 
-Security fixes are applied to the latest public test release. The current public test version is 1.5.66.
+Security fixes are applied to the latest public test release. The current public test version is 1.5.67.
 
 ## Reporting a vulnerability
 

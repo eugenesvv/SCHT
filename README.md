@@ -1,8 +1,8 @@
-# SC Hauling Log Tracker v1.5.66
+# SC Hauling Log Tracker v1.5.67
 
 A local, offline-first Windows desktop application for Star Citizen Covalex cargo hauling. It reads `Game.log`, detects accepted/completed/abandoned contracts, tracks profit and duration, provides a loading checklist, and opens a compact Logistics Overlay.
 
-> **Public test software:** version 1.5.66 may contain defects. Keep normal backups of data you care about and review exported manifests before sharing them.
+> **Public test software:** version 1.5.67 may contain defects. Keep normal backups of data you care about and review exported manifests before sharing them.
 
 ## Highlights
 
@@ -26,9 +26,12 @@ Active release candidates are prepared on the `dev` branch. From GitHub Actions,
 
 Before promoting `dev` to `main`, complete the [release checklist](docs/RELEASE_CHECKLIST.md). A version tag should be created only after the tested commit reaches `main`; tags trigger a fresh Windows release build.
 
-## v1.5.66 First public test-release packaging
+## v1.5.67 Patch release
 
-- Rebases the public version line from the internal 3.x development series to 1.5.66.
+- Refines initial dashboard sizing, spacing, footer placement, and themed reset confirmation.
+- Merges contracts that share a drop-off into one Logistics Board group and clarifies pickup/drop-off labels and arrows in the overlay.
+- Compacts OCR progress notifications so all text remains inside the notification card.
+- Preserves every completion when several stacked missions finish in the same instant.
 - Opens the desktop dashboard wider and keeps the primary toolbar beside the Game.log field at normal desktop sizes.
 - Stores app-owned data under `%LOCALAPPDATA%\SCHT\` and migrates the former folder automatically.
 - Adds a per-user Windows installer and uninstaller that remove SCHT program files, shortcuts, current AppData, and the legacy AppData folder.
@@ -396,7 +399,7 @@ dist\SCHT.exe
 1. Build `dist\SCHT.exe` with `build_exe.bat`.
 2. Install Inno Setup 6 on the build PC.
 3. Run `build_installer.bat`.
-4. Distribute `dist\SCHT-Setup-1.5.66.exe`.
+4. Distribute `dist\SCHT-Setup-1.5.67.exe`.
 
 The installer is per-user and normally needs no administrator permission. It installs SCHT under `%LOCALAPPDATA%\Programs\SCHT`, creates Start Menu integration, and offers an optional desktop shortcut. Uninstalling SCHT removes the installed files, shortcuts, `%LOCALAPPDATA%\SCHT`, and the former `%LOCALAPPDATA%\SC Hauling Log Tracker` folder. It does not remove Microsoft Edge WebView2 because that is a shared Windows component.
 
