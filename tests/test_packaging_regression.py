@@ -92,6 +92,12 @@ class FirstReleasePackagingRegressionTest(unittest.TestCase):
         self.assertIn("gh release create", workflow)
         self.assertIn("contents: write", workflow)
 
+    def test_ci_test_cache_uses_the_repository_dependency_file(self):
+        workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+        self.assertIn("cache: pip", workflow)
+        self.assertIn("cache-dependency-path: requirements-build.txt", workflow)
+        self.assertIn("python -m pip install -r requirements-build.txt", workflow)
+
     def test_standalone_exe_bundles_python_for_players(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         spec = (ROOT / "SCHT.spec").read_text(encoding="utf-8")
