@@ -52,6 +52,10 @@ test_data/*
 !test_data/Game_4_8_five_stacked_contracts.log
 !test_data/Game_4_8_seven_sequential_contracts.log
 !test_data/Route_Planner_Persistence_Debug.log
+!test_data/Route_Planner_Persistence_Phase_1.log
+!test_data/Route_Planner_Persistence_Phase_2.log
+!test_data/Route_Planner_Persistence_Phase_3.log
+!test_data/ROUTE_PLANNER_PERSISTENCE_TEST.md
 
 # Local OCR captures and reports can contain player/session information
 test_data/ocr_screenshots/
