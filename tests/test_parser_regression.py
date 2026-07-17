@@ -644,6 +644,25 @@ class AutomaticOcrParsingRegressionTest(unittest.TestCase):
         self.assertEqual(updated[0].payout_provenance, "ocr")
         self.assertTrue(updated[0].is_load_plannable())
 
+    def test_successfully_validated_ocr_override_keeps_import_marker(self):
+        normalized = tracker.normalize_contract_overrides({
+            "first-contract": {
+                "source": "ocr", "validated": True, "payout": 215250,
+                "objectives": [{
+                    "pickup": "The Golden Riviera", "dropoff": "Starlight Service Station",
+                    "commodity": "Quartz", "scu": "3", "provenance": "exact_log",
+                }],
+            }
+        })
+        self.assertTrue(normalized["first-contract"]["validated"])
+        self.assertEqual(normalized["first-contract"]["payout"], 215250)
+        self.assertEqual(normalized["first-contract"]["objectives"][0]["pickup"], "The Golden Riviera")
+
+    def test_auto_ocr_import_does_not_drop_locations_when_log_scu_is_exact(self):
+        source = Path(tracker.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("elif not all_exact:", source)
+        self.assertIn('source="ocr", validated=True', source)
+
     def test_aggregate_ocr_rows_are_not_multiplied(self):
         base = [
             tracker.CargoMission(title="Junior Cargo Haul", rank="Junior", pickup="HDMS-Hahn", dropoff="Everus Harbor", commodity="Iron (Ore)", scu="", mission_id="m4"),

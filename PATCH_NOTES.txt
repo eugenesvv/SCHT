@@ -1,4 +1,203 @@
-SCHT 1.5.67 — interface and stacked-mission reliability patch
+SCHT 1.6.0 — Route Planner feature release
+
+- Promotes a matching unfinished pickup-only contract stop when it is selected as the starting waypoint, instead of adding a duplicate empty stop.
+- Reoptimizes from the visible custom draft's completed prefix and supplies pending fixed endpoints directly to the route solver.
+- Preserves completed endpoint markers, rejects invalid reoptimization results, and rolls back the complete route workspace on failure.
+
+SCHT 1.5.104 — Route Planner session recovery
+
+- Clears every persisted route workspace, route selection, and extra waypoint when Reset Session is confirmed.
+- Recalculates missing, failed, or outdated All active results instead of restoring a stale snapshot.
+- Reuses a saved route only while it remains successful and matches the current active contract topology.
+
+SCHT 1.5.103 — refreshed illustrated Manual
+
+- Rewrites the in-app Manual around the current dashboard, Contract Log, Logistics Board, Route Planner, compact overlays, settings, and correction workflows.
+- Adds a dedicated Route Planner chapter covering route scopes, contract selection, editing, waypoints, outdated routes, summary data, and flight overlay use.
+- Bundles fifteen current UI screenshots and verifies every offline Help asset during packaging regression tests.
+
+SCHT 1.5.102 — route-sorted Logistics Overlay
+
+- Sorts Logistics Overlay groups and their destination/pickup rows by the active Route Planner order.
+- Uses canonical location IDs with stable fallback ordering for unresolved or equal-ranked locations.
+- Leaves the original Logistics ordering unchanged when no valid route exists and continues following the last created route while it is marked outdated.
+
+SCHT 1.5.101 — tighter Logistics group spacing
+
+- Packs Logistics Board route groups at the top instead of stretching rows to fill the board.
+- Reduces group-grid gaps and separator padding from 13 px to 8 px.
+- Keeps standard card height and long-list growth unchanged.
+
+SCHT 1.5.100 — stable Logistics card heights
+
+- Sets desktop Logistics Board route-group cards to a consistent 168 px standard height.
+- Allows height growth only when a destination has more than two visible commodity rows.
+- Updates height behavior when loaded commodities are hidden or shown.
+
+SCHT 1.5.99 — unified 11 px window corners
+
+- Standardizes the main window, Route and Logistics overlays, and Edit/Delete/About dialog corners at 11 px.
+- Applies the same radius to the main window's primary panels while preserving smaller internal-control radii.
+
+SCHT 1.5.98 — border-anchored dialog controls
+
+- Anchors Edit, Delete, and About close controls 4 px from the top and right window borders.
+- Removes header content and height from their positioning reference.
+
+SCHT 1.5.97 — title-aligned dialog controls
+
+- Moves Edit, Delete, and About close controls slightly upward to align with the heading line.
+- Leaves horizontal placement, dimensions, and hover styling unchanged.
+
+SCHT 1.5.96 — aligned dialog close controls
+
+- Moves Edit, Delete, and About close controls to the overlays' 4 px right inset.
+- Vertically centers Edit and About controls and aligns Delete with its header icon.
+- Keeps the unified size and hover treatment unchanged.
+
+SCHT 1.5.95 — unified window controls
+
+- Standardizes overlay controls at 28 px with shared spacing, radius, icon alignment, and transitions.
+- Matches Edit, Delete, and About close controls to the same geometry.
+- Reuses the overlay blue hover background and red close-icon feedback everywhere.
+
+SCHT 1.5.94 — borderless overlay controls
+
+- Removes button borders and separators from both overlay titlebars.
+- Keeps the existing blue control hover and red overlay close hover treatments.
+- Adds the red close-hover color to Edit, Delete, and About dialogs.
+
+SCHT 1.5.93 — cleaner Logistics destination cells
+
+- Moves card-header locations farther from the colored accent border.
+- Gives destination-cell names and system subtitles compact Route-style typography with 12 px names and matching chevron sizes.
+- Removes redundant item-count and SCU counters from destination-row headers.
+
+SCHT 1.5.92 — refined Logistics card progress
+
+- Matches Logistics system subtitles to Route Overlay casing, spacing, and typography.
+- Moves header location content slightly right and removes the square before SCU progress.
+- Restores live loaded/total SCU values with correct aggregate shared-load accounting.
+
+SCHT 1.5.91 — Route-style Logistics card headers
+
+- Uses Route Overlay typography for Logistics card-header location names and system subtitles.
+- Moves pickup/drop-off identification and chevrons to a color-coded right-side action label.
+- Restyles total SCU as a compact commodity line and removes the chevron beside the header location.
+
+SCHT 1.5.90 — unified overlay controls and settings
+
+- Matches the Logistics titlebar controls to the Route Overlay and removes the close-button red border artifact.
+- Removes both settings headings, the Logistics opacity percentage, and its redundant position-lock switch.
+- Standardizes overlay setting labels at regular 10 px while preserving Route-style opacity controls.
+
+SCHT 1.5.89 — clearer active waypoint subtitle
+
+- Enlarges the compact overlay's system and active QT subtitle without changing its three-line layout.
+
+SCHT 1.5.88 — accurate active-leg route overlay
+
+- Includes the QT leg to the active waypoint in the remaining-distance readout.
+- Shows the active waypoint's location context and QT distance on a new second line.
+- Vertically centers the expanded stop label and leg-number circle while cargo moves to line three.
+
+SCHT 1.5.87 — reliable first-contract OCR import
+
+- Retains OCR pickup locations even when `Game.log` already supplied an exact cargo quantity.
+- Marks successfully validated automatic imports so a later watcher refresh cannot erase their objectives or payout.
+- Preserves exact-log quantity provenance while applying the richer OCR route details.
+- Adds regression coverage for the first-contract payout, pickup, and validation marker.
+
+SCHT 1.5.86 — stable live route progress
+
+- Stops routine log refreshes and delivery-completion events from marking the current route outdated.
+- Compares the actual route-operation set before invalidating saved route workspaces.
+- Still invalidates All Active routes for newly accepted contracts and any route whose cargo objectives change.
+- Keeps unrelated new contracts from invalidating a Contracts-scoped route.
+
+SCHT 1.5.85 — unified compact overlay styling
+
+- Restyles the Logistics Board Overlay to match the compact Route Planner Overlay.
+- Adds the shared flat title bar, violet line icon, progress counter, and pin control.
+- Tightens progress controls, route groups, destination rows, and cargo checklist spacing.
+- Preserves resizing, scrolling, hide-loaded, clear-checks, and checklist synchronization behavior.
+
+SCHT 1.5.84 — contextual compact commodity line
+
+- Hides commodity-line chevrons when a stop is pickup-only or drop-off-only.
+- Combines mixed cargo into one line with drop-off commodities before pickup commodities.
+- Uses compact 11 px double chevrons to separate the two mixed cargo groups.
+
+SCHT 1.5.83 — clearer compact overlay arrows and messages
+
+- Replaces pickup and drop-off arrows throughout the app with double-chevron SVG icons.
+- Uses large blue up and violet down double chevrons instead of lane text in the compact overlay.
+- Reclaims horizontal space for commodity lists while preserving accessible labels.
+- Enlarges route-empty, outdated-route, and route-complete messages.
+
+SCHT 1.5.82 — Route Overlay scenario harness
+
+- Adds a 13-case visual gallery using the real compact Route Overlay at its production size.
+- Covers empty, outdated, pickup, drop-off, mixed, overflow, waypoint, warning, advancement, final-stop, and completed-route states.
+- Keeps debug interactions isolated from the live checklist and adds focused automated regression coverage.
+
+SCHT 1.5.81 — compact overlay cargo lanes
+
+- Separates loading and unloading commodities into labeled, color-coded lanes.
+- Automatically scrolls a lane only when its cargo list overflows the available width.
+- Keeps ticker motion stable across state refreshes and respects reduced-motion preferences.
+
+SCHT 1.5.80 — Dudley & Daughters OCR normalization
+
+- Recognizes Dudley & Daughters when OCR reads the ampersand as "e" or "and".
+- Resolves full and truncated L4 Lagrange hierarchy text to the canonical Pyro location.
+
+SCHT 1.5.79 — clearer Route Planner overlay buttons
+
+- Increases compact overlay button text from 7.5 px to 9 px for easier reading.
+
+SCHT 1.5.78 — aligned Route Planner loading action
+
+- Places Mark All Loaded immediately left of the pickup/drop-off label and vertically centers both controls as one action row.
+- Removes the onboard-SCU estimate from the compact footer, leaving only distance remaining.
+
+SCHT 1.5.77 — Route Planner overlay button polish
+
+- Moves Mark All Loaded into the cargo-detail row, keeping route-action labels uncluttered.
+- Makes overlay action buttons larger with centered content and replaces the Next WP arrow with a chevron.
+
+SCHT 1.5.76 — actionable Route Planner overlay
+
+- Omits a cargo-free starting user waypoint because it represents the current position.
+- Adds a Next WP button for manually advancing past intermediate user waypoints.
+- Adds Mark All Loaded for pickup stops and enlarges the remaining-distance and onboard-SCU footer text.
+
+SCHT 1.5.75 — compact Route Planner overlay refinements
+
+- Reduces the compact Route Planner overlay footprint and removes excess spacing.
+- Uses the shared project control icons with dedicated pin and unpin states.
+- Shows both pickup and drop-off actions when the current stop contains both.
+
+SCHT 1.5.74 — compact Route Planner overlay
+
+- Adds a dedicated always-on-top compact Route Planner window, launched from the Route Planner header.
+- Shows the current stop number, location, pickup/drop-off action, cargo summary, next stop, next QT leg, remaining distance, and onboard cargo.
+- Keeps route-overlay position, opacity, and topmost settings separate from the Logistics overlay.
+
+SCHT 1.5.73 — stable route reordering
+
+- Keeps route cards attached to their distance and waypoint connectors while a drag-and-drop reorder is saved.
+- Uses the whole target card as the drop zone, shows whether the dragged stop will land before or after it, and blocks overlapping reorder requests.
+
+SCHT 1.5.72 — user waypoint card polish
+
+- Replaces the generated user-waypoint diamond with a proper location-pin icon.
+- Vertically centers the personal-stop description inside user waypoint cards.
+
+SCHT 1.5.69 — fixed route endpoint persistence patch
+
+- Keeps manually selected start and final waypoints when a custom route is reoptimized.
+- Restores the complete prior custom route if reoptimization fails, preventing partial route replacement or lost user waypoints.
 
 - Starts the dashboard at its supported minimum width and removes the unused first-run notification and excess top spacing.
 - Keeps the dashboard status footer pinned to the bottom and restores the themed reset-session confirmation.
@@ -8,6 +207,6 @@ SCHT 1.5.67 — interface and stacked-mission reliability patch
 - Correctly completes every mission when several stacked hauling contracts finish in the same millisecond.
 - Fixes GitHub Actions dependency caching so regression tests run reliably on every push.
 
-Recommended download: SCHT-Setup-1.5.67.exe
+Recommended download: SCHT-Setup-1.6.0.exe
 
 The portable SCHT.exe is also provided. SHA256SUMS.txt contains checksums for both downloads.

@@ -1,8 +1,8 @@
-# SC Hauling Log Tracker v1.5.67
+# SC Hauling Log Tracker v1.6.0
 
 A local, offline-first Windows desktop application for Star Citizen Covalex cargo hauling. It reads `Game.log`, detects accepted/completed/abandoned contracts, tracks profit and duration, provides a loading checklist, and opens a compact Logistics Overlay.
 
-> **Public test software:** version 1.5.67 may contain defects. Keep normal backups of data you care about and review exported manifests before sharing them.
+> **Public test software:** version 1.6.0 may contain defects. Keep normal backups of data you care about and review exported manifests before sharing them.
 
 ## Highlights
 
@@ -26,7 +26,202 @@ Active release candidates are prepared on the `dev` branch. From GitHub Actions,
 
 Before promoting `dev` to `main`, complete the [release checklist](docs/RELEASE_CHECKLIST.md). A version tag should be created only after the tested commit reaches `main`; tags trigger a fresh Windows release build.
 
-## v1.5.67 Patch release
+## v1.6.0 Feature release
+
+- Promotes an unfinished pickup-only contract stop in place when its location is selected as the custom route start, avoiding a duplicate empty waypoint.
+- Keeps fixed start and final endpoints inside the optimization constraints so reoptimization cannot move them away from their selected positions.
+- Preserves completed history from the visible custom draft, rejects invalid solver results, and restores the original draft on any reoptimization failure.
+
+## v1.5.104 Patch release
+
+- Clears saved All active, Contracts, Custom, and draft route workspaces when Reset Session is confirmed.
+- Recalculates failed or outdated route results instead of restoring an unusable cached snapshot after contracts change.
+- Keeps reuse for successful, current routes whose active cargo inputs still match.
+
+## v1.5.103 Patch release
+
+- Rebuilds the illustrated in-app Manual around the current dashboard, Contract Log, Logistics Board, Route Planner, overlays, settings, and correction workflows.
+- Adds a dedicated Route Planner chapter covering route scopes, contract selection, edit mode, waypoints, outdated routes, summaries, and the compact Route Overlay.
+- Bundles fifteen current UI screenshots for offline Help and adds regression coverage for every referenced guide asset.
+
+## v1.5.102 Patch release
+
+- Sorts Logistics Overlay route groups by the active Route Planner stop order.
+- Sorts destination or pickup rows within each overlay group by the same route.
+- Retains the existing Logistics order when no valid current route exists.
+
+## v1.5.101 Patch release
+
+- Prevents Logistics Board route-group rows from stretching to fill the board height.
+- Packs groups at the top and reduces grid and separator padding from 13 px to 8 px.
+- Preserves the 168 px standard card height and long-commodity expansion behavior.
+
+## v1.5.100 Patch release
+
+- Gives desktop Logistics Board route-group cards a consistent 168 px standard height.
+- Expands a route group only when a destination contains more than two visible commodity rows.
+- Recalculates the expansion state when loaded commodities are hidden or shown.
+
+## v1.5.99 Patch release
+
+- Standardizes the main window, both overlays, and Edit/Delete/About dialog corners at 11 px.
+- Updates the main window's shared primary-panel radius to the same 11 px value.
+- Preserves the smaller purpose-specific radii used by controls, badges, and nested content.
+
+## v1.5.98 Patch release
+
+- Anchors the Edit, Delete, and About close controls to a fixed 4 px inset from the top and right window borders.
+- Makes their placement independent of title text, subtitles, icons, and header height.
+
+## v1.5.97 Patch release
+
+- Moves the Edit, Delete, and About close controls slightly upward to align with their title text.
+- Keeps the existing right inset, control dimensions, and hover styling unchanged.
+
+## v1.5.96 Patch release
+
+- Moves the Edit, Delete, and About close controls to the same 4 px right inset used by the overlays.
+- Vertically centers the Edit and About close controls and aligns Delete with its header icon.
+- Leaves the shared control dimensions and hover behavior unchanged.
+
+## v1.5.95 Patch release
+
+- Standardizes Route and Logistics overlay controls at 28 px with matching spacing, radius, and alignment.
+- Gives Edit, Delete, and About close controls the same geometry and transition behavior.
+- Uses the shared blue hover background and red close-icon feedback across all affected windows.
+
+## v1.5.94 Patch release
+
+- Removes separators and borders from the Route and Logistics overlay titlebar controls.
+- Preserves the overlays' blue control hover feedback and red close-button hover color.
+- Adds the same red close-hover feedback to the Edit, Delete, and About dialogs.
+
+## v1.5.93 Patch release
+
+- Moves Logistics card-header location content slightly farther from the accent border.
+- Restyles destination-cell locations with natural-case Route-style typography, 12 px names, and matching 11 px chevrons.
+- Removes duplicated item-count and SCU progress from destination-row headers.
+
+## v1.5.92 Patch release
+
+- Matches Logistics card system subtitles to the Route Overlay's natural casing and spacing.
+- Nudges header location content slightly right and removes the decorative square from SCU progress.
+- Restores live loaded/total SCU values, including shared-load-aware totals for aggregate cards.
+
+## v1.5.91 Patch release
+
+- Restyles Logistics Overlay card headers with Route-style location names and system subtitles.
+- Moves pickup/drop-off identification and its chevron to a color-coded action label on the right.
+- Removes the location-side header chevron and presents total SCU as a compact commodity-style line.
+
+## v1.5.90 Patch release
+
+- Unifies Logistics and Route overlay titlebar control styling and removes the Logistics close-button red border artifact.
+- Removes both settings-menu headings and the Logistics opacity percentage and duplicate position-lock switch.
+- Uses regular 10 px labels for Opacity, Lock size, and Always on top in both overlay menus.
+
+## v1.5.89 Patch release
+
+- Enlarges the compact overlay's active system and QT subtitle for better readability.
+
+## v1.5.88 Patch release
+
+- Includes the QT leg to the active waypoint in the compact overlay's remaining-distance total.
+- Adds the active waypoint's system/location context and QT distance beneath its name.
+- Keeps the expanded three-line stop details and leg-number circle vertically centered.
+
+## v1.5.87 Patch release
+
+- Fixes successful first-contract OCR imports losing pickup locations and payout after a live watcher refresh.
+- Retains OCR route details while keeping exact `Game.log` quantities authoritative.
+- Persists a validation marker for automatic imports that already passed contract matching.
+
+## v1.5.86 Patch release
+
+- Keeps calculated routes valid while live log updates record loading and delivery progress.
+- Invalidates routes only when their cargo-operation inputs genuinely change.
+- Preserves proper invalidation for new All Active contracts, corrected objectives, and removed contracts.
+
+## v1.5.85 Patch release
+
+- Restyles the Logistics Board Overlay to match the compact Route Planner Overlay.
+- Adds matching window chrome, a header progress counter, and a direct pin/unpin control.
+- Makes cargo groups flatter and more compact without changing checklist behavior.
+
+## v1.5.84 Patch release
+
+- Removes redundant commodity-line chevrons from pickup-only and drop-off-only compact stops.
+- Combines mixed-stop commodities into one line, ordered drop-off first and pickup second.
+- Uses the same compact 11×11 double chevrons for mixed commodity groups and the action labels.
+
+## v1.5.83 Patch release
+
+- Replaces pickup and drop-off arrows throughout the app with the supplied double-chevron SVG icons.
+- Uses large, color-coded double chevrons instead of **Load** and **Unload** text in compact cargo lanes.
+- Gives commodity lists more horizontal room while retaining accessible arrow labels.
+- Enlarges empty, outdated, and completed Route Overlay messages for easier reading.
+
+## v1.5.82 Patch release
+
+- Adds a deterministic compact Route Overlay debug gallery covering 13 route, action, overflow, waypoint, warning, advancement, and terminal states.
+- Launch it from source with `python sc_hauling_tracker.py --debug-route-overlay`; the fixtures cannot modify the live loading checklist.
+- Adds a focused automated regression module for the complete scenario matrix.
+
+## v1.5.81 Patch release
+
+- Separates compact-overlay cargo into blue **Load** and violet **Unload** lanes at mixed-action stops.
+- Scrolls only overflowing cargo lanes, with edge fades, stable animation between refreshes, and reduced-motion support.
+
+## v1.5.80 Patch release
+
+- Recognizes OCR variants of **Dudley & Daughters**, including the common `Dudley e Daughters` reading and truncated Lagrange hierarchy text.
+
+## v1.5.79 Patch release
+
+- Increases compact Route Planner action-button text to improve readability.
+
+## v1.5.78 Patch release
+
+- Places **Mark all loaded** directly left of the pickup/drop-off status and vertically centers the combined action row.
+- Simplifies the compact footer to show remaining route distance without the onboard-SCU estimate.
+
+## v1.5.77 Patch release
+
+- Moves **Mark all loaded** beside the current cargo details instead of stacking it beneath route-action labels.
+- Enlarges and centers compact overlay controls and replaces the Next WP arrow with a chevron icon.
+
+## v1.5.76 Patch release
+
+- Skips a cargo-free user waypoint when it is the route starting position.
+- Adds manual waypoint advancement and a one-click **Mark all loaded** control for the current pickup location.
+- Enlarges remaining-distance and onboard-cargo text in the compact overlay footer.
+
+## v1.5.75 Patch release
+
+- Makes the compact Route Planner overlay shorter and narrower with tighter internal spacing.
+- Uses the shared project control icons, adds distinct pin/unpin states, and displays both actions at mixed pickup/drop-off stops.
+
+## v1.5.74 Patch release
+
+- Adds a dedicated compact Route Planner overlay with current-stop progress, cargo, action, next-leg, remaining-distance, and onboard-SCU details.
+- Provides position lock, opacity, always-on-top, minimize, and close controls with settings stored separately from the Logistics overlay.
+
+## v1.5.73 Patch release
+
+- Stabilizes route-edit drag and drop so stop cards never detach from their connector rows while the new order is saved.
+- Uses the whole target card as the drop zone, adds clear before/after placement feedback, and prevents overlapping reorder requests.
+
+## v1.5.72 Patch release
+
+- Uses a proper location-pin icon for user waypoint labels.
+- Vertically centers user waypoint explanatory text inside its route card.
+
+## v1.5.69 Patch release
+
+- Preserves manually selected start and final route waypoints during custom-route reoptimization.
+- Rolls back safely to the prior custom route if rebuilding fails.
+
+## v1.5.68 Patch release
 
 - Refines initial dashboard sizing, spacing, footer placement, and themed reset confirmation.
 - Merges contracts that share a drop-off into one Logistics Board group and clarifies pickup/drop-off labels and arrows in the overlay.
@@ -399,7 +594,7 @@ dist\SCHT.exe
 1. Build `dist\SCHT.exe` with `build_exe.bat`.
 2. Install Inno Setup 6 on the build PC.
 3. Run `build_installer.bat`.
-4. Distribute `dist\SCHT-Setup-1.5.67.exe`.
+4. Distribute `dist\SCHT-Setup-1.6.0.exe`.
 
 The installer is per-user and normally needs no administrator permission. It installs SCHT under `%LOCALAPPDATA%\Programs\SCHT`, creates Start Menu integration, and offers an optional desktop shortcut. Uninstalling SCHT removes the installed files, shortcuts, `%LOCALAPPDATA%\SCHT`, and the former `%LOCALAPPDATA%\SC Hauling Log Tracker` folder. It does not remove Microsoft Edge WebView2 because that is a shared Windows component.
 

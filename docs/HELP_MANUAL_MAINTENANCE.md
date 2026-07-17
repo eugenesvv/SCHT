@@ -29,6 +29,17 @@ The Help & User Guide is part of the product, not optional release documentation
    - Open Help in the packaged EXE with the network disconnected.
    - Check every image, anchor, scroll area, close action, and Escape behavior.
 
+## Current guide coverage
+
+The illustrated Manual must retain task-oriented coverage for:
+
+- primary Game.log controls, timer, live status, dashboard metrics, and Contract Log;
+- Logistics Board loading checks, shared quantities, standard card sizing, and the Logistics Overlay;
+- Route Planner scopes, contract selection, route summaries, custom editing, waypoints, outdated routes, and Route Overlay progress;
+- OCR review, MissionId-specific corrections, local contract deletion, settings, exports, and reset safety.
+
+The current screenshot set is intentionally split into focused crops in `assets/help/`. Keep all filenames referenced by `HELP_IMAGE_ASSETS`, `SCHT.spec`, guide markup, and packaging tests synchronized.
+
 ## Source reminder
 
 The guide markup is preceded by this marker:

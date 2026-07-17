@@ -22,13 +22,22 @@ class PortableExePackagingRegressionTest(unittest.TestCase):
     def test_help_manual_assets_are_bundled(self):
         spec = (ROOT / "SCHT.spec").read_text(encoding="utf-8")
         expected = {
-            "toolbar.jpg",
-            "dashboard.jpg",
-            "logistics_board.jpg",
-            "overlay.jpg",
-            "settings_menu.jpg",
+            "toolbar.png",
+            "session_timer.png",
+            "session_status.png",
+            "dashboard_metrics.png",
+            "contract_log.png",
+            "logistics_board.png",
+            "logistics_overlay.png",
+            "overlay_settings.png",
+            "route_planner.png",
+            "route_planner_edit.png",
+            "route_contracts.png",
+            "route_overlay.png",
+            "contract_editor.png",
+            "delete_contract.png",
+            "settings_menu.png",
             "share_menu.jpg",
-            "contract_editor.jpg",
         }
         self.assertEqual(expected, set(tracker.HELP_IMAGE_ASSETS))
         for name in expected:
@@ -54,7 +63,7 @@ class PortableExePackagingRegressionTest(unittest.TestCase):
 
 class FirstReleasePackagingRegressionTest(unittest.TestCase):
     def test_public_version_is_rebased_to_one(self):
-        self.assertEqual("1.5.67", tracker.APP_VERSION)
+        self.assertEqual("1.6.0", tracker.APP_VERSION)
         self.assertTrue(tracker.APP_VERSION.startswith("1."))
 
     def test_windows_appdata_uses_scht_and_migrates_legacy_folder(self):

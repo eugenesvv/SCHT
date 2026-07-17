@@ -14,6 +14,32 @@ import sc_hauling_tracker as tracker  # noqa: E402
 
 
 class OverlayUiRegressionTest(unittest.TestCase):
+    def test_logistics_overlay_matches_route_overlay_chrome(self):
+        html = tracker.OVERLAY_HTML
+        self.assertIn("LOGISTICS BOARD", html)
+        self.assertIn('class="loadout-mark"', html)
+        self.assertIn('id="headerProgress"', html)
+        self.assertIn('id="pinBtn"', html)
+        self.assertIn("$('pinBtn').classList.toggle('active'", html)
+        self.assertIn("linear-gradient(145deg,#171827,#0b0c14 72%)", html)
+        self.assertIn("grid-template-rows:38px 46px minmax(0,1fr) 25px", html)
+        self.assertIn('.window-actions{height:100%;display:flex;align-items:center;gap:2px;padding:0 4px;border:0}', html)
+        self.assertIn('.icon-btn{width:28px;height:28px;padding:0;border:0;border-radius:7px;background:transparent;', html)
+        self.assertIn('.icon-btn.danger:hover{color:#ff7181}', html)
+        self.assertNotIn('border-left:1px solid rgba(255,255,255,.04)', html)
+        route_html = tracker.ROUTE_OVERLAY_HTML
+        self.assertIn('.actions{height:100%;display:flex;align-items:center;gap:2px;padding:0 4px;border:0}', route_html)
+        self.assertIn('.action{width:28px;height:28px;padding:0;border:0;border-radius:7px;background:transparent;', route_html)
+        self.assertIn('.action.danger:hover{color:#ff7181}', route_html)
+        self.assertIn('.setting-copy strong{font-size:10px;font-weight:400}', html)
+        self.assertNotIn('class="settings-head"', html)
+        self.assertNotIn('id="opacityValue"', html)
+        self.assertNotIn('id="positionLockSwitch"', html)
+        self.assertIn('function sortSectionsByRoute(sections,route){if(!route?.valid||!(route.stops||[]).length)return sections;', html)
+        self.assertNotIn('sortSectionsByRoute(sections,route){if(!route?.valid||route?.outdated', html)
+        self.assertIn('sections=sortSectionsByRoute(sections,cache?.route);', html)
+        self.assertIn('a.rank-b.rank||a.index-b.index', html)
+
     def test_overlay_is_permanently_compact(self):
         html = tracker.OVERLAY_HTML
         self.assertIn('<body class="size-unlocked compact">', html)
@@ -25,7 +51,7 @@ class OverlayUiRegressionTest(unittest.TestCase):
     def test_overlay_labels_route_directions_and_reuses_contract_arrows(self):
         html = tracker.OVERLAY_HTML
         self.assertNotIn("let label='Direct route'", html)
-        self.assertIn("fixedKind==='pickup'?'PICK UP LOCATION':'DROP OFF LOCATION'", html)
+        self.assertIn("fixedKind==='pickup'?'PICK UP':'DROP OFF'", html)
         self.assertIn("shared?' (SHARED)':''", html)
         self.assertIn("const columnKind=fixedKind==='pickup'?'dropoff':'pickup'", html)
         self.assertIn('const LOCATION_SVGS=Object.freeze({', html)
@@ -34,6 +60,23 @@ class OverlayUiRegressionTest(unittest.TestCase):
         self.assertIn('.overlay-location.pickup-route .route-icon{color:#6f9bd1}', html)
         self.assertIn('.overlay-location.dropoff-route .route-icon{color:#8979d8}', html)
         self.assertIn('.overlay-location .location-text{display:block;min-width:0;margin-top:0!important;color:inherit!important;font:inherit!important;', html)
+        self.assertNotIn('PICK UP LOCATION', html)
+        self.assertNotIn('DROP OFF LOCATION', html)
+        self.assertIn('class="group-action ${fixedKind}-action"', html)
+        self.assertIn('class="group-total">${esc(totalLabel)}</span>', html)
+        self.assertNotIn('class="group-total"><i', html)
+        self.assertIn('.group-head .location-name{display:block;margin:0;color:#f1f3ff;font-size:15px;font-weight:900', html)
+        self.assertIn('.group-head .group-location .location-subtitle{display:block;margin-top:3px;color:#777d97;font-size:8.5px;font-weight:650', html)
+        self.assertIn('letter-spacing:normal;text-transform:none', html)
+        self.assertIn('column-gap:12px}.compact .group-head{padding-left:16px}', html)
+        self.assertIn("loadedSectionScu=mode==='aggregate_pickups'?sharedStats([section]).loaded:sectionProgress.loadedScu", html)
+        self.assertIn('`${fmt(loadedSectionScu)} / ${fmt(Number(section.total||sectionProgress.totalScu))} SCU`', html)
+        self.assertIn('.route-title .route-icon{width:11px;height:11px;flex:0 0 11px}', html)
+        self.assertIn('.route-title .location-name{display:block;color:#f1f3ff;font-family:"Segoe UI Variable Text","Segoe UI",Arial,sans-serif;font-size:12px;font-weight:900', html)
+        self.assertIn('.route-title .location-subtitle{display:block;margin-top:3px;color:#777d97;font-family:"Segoe UI Variable Text","Segoe UI",Arial,sans-serif;font-size:8.5px;font-weight:650', html)
+        self.assertNotIn('<span>${esc(progress)}</span>', html)
+        self.assertNotIn("const progress=mode==='aggregate_pickups'", html)
+        self.assertNotIn('${LOCATION_SVGS[fixedKind]}<span class="location-text">', html)
 
 
 class MainWindowMaximizeRegressionTest(unittest.TestCase):
@@ -224,7 +267,8 @@ class SharedPickupLogisticsRegressionTest(unittest.TestCase):
         self.assertIn('"columns": columns_payload', source)
         self.assertIn('"scu": ""', source)
         self.assertIn("SCU not split", source)
-        self.assertIn("collect ${esc(next.item.commodity)} at ${esc(next.column.location)}", source)
+        self.assertIn("collect ${esc(next.item.commodity)} at ${esc(columnName)}", source)
+        self.assertIn("fixed_location_info", source)
         self.assertNotIn('"location": "Any listed pickup"', source)
         self.assertNotIn('Any pickup:', source)
 
@@ -266,6 +310,18 @@ class SharedPickupLogisticsRegressionTest(unittest.TestCase):
         self.assertIn('.editor-close svg{width:12px;height:12px;stroke:currentColor;', source)
         self.assertIn('.confirm-close{width:24px;height:24px;padding:0;border:0;background:transparent;', source)
         self.assertIn('.confirm-close svg{width:12px;height:12px;stroke:currentColor;', source)
+        self.assertIn('.editor-close,.confirm-close{width:28px;height:28px;border-radius:7px;', source)
+        self.assertIn('.editor-close:hover,.confirm-close:hover{background:rgba(90,167,255,.08);color:#ff7181;transform:none}', source)
+        self.assertIn('.editor-head,.info-head,.confirm-head{position:relative}', source)
+        self.assertIn('.editor-head>.editor-close,.info-head>.editor-close,.confirm-head>.confirm-close{position:absolute;right:4px;top:4px;transform:none}', source)
+        self.assertIn('--radius:11px;', source)
+        self.assertIn('.window-root,.editor-modal,.confirm-modal,.info-modal{border-radius:11px}', source)
+        self.assertIn('.logistics-groups{align-content:start;gap:8px}.logistics-group+.logistics-group{padding-top:8px}', source)
+        self.assertIn('@media(min-width:981px){.logistics-group .pickup-card,.logistics-group .destinations,.logistics-group .dest-card{height:168px;min-height:168px}', source)
+        self.assertIn('.logistics-group.long-commodity-list .pickup-card,.logistics-group.long-commodity-list .destinations,.logistics-group.long-commodity-list .dest-card{height:auto}', source)
+        self.assertIn('let hasLongCommodityList=false;', source)
+        self.assertIn('if(cardItems.length>2)hasLongCommodityList=true;', source)
+        self.assertIn("${hasLongCommodityList?' long-commodity-list':''}", source)
         self.assertIn('id="contractEditorClose" type="button" aria-label="Close editor"><svg viewBox="0 0 16 16"', source)
         self.assertIn('id="contractDeleteClose" type="button" aria-label="Close confirmation"><svg viewBox="0 0 16 16"', source)
         self.assertIn('class="editor-remove" type="button" title="Remove objective" aria-label="Remove objective">${DELETE_CONTRACT_SVG}</button>', source)
@@ -453,11 +509,17 @@ class TopMenuRegressionTest(unittest.TestCase):
         self.assertIn('id="guideQuickStart"', source)
         self.assertIn('id="guideDashboard"', source)
         self.assertIn('id="guideLogistics"', source)
+        self.assertIn('id="guideRoutePlanner"', source)
         self.assertIn('id="guideCorrections"', source)
         self.assertIn('id="guideMenus"', source)
         self.assertIn('id="guideTroubleshooting"', source)
         self.assertIn('Choose the log once → Start Watch', source)
         self.assertIn('shared-total multi-pickup contract', source)
+        self.assertIn('The calculated route is the source order for both compact overlays.', source)
+        self.assertIn('An <strong>outdated</strong> label means cargo or contract inputs changed after calculation.', source)
+        self.assertIn('Use the titlebar pin to lock movement.', source)
+        for image_name in tracker.HELP_IMAGE_ASSETS:
+            self.assertIn(f'/assets/help/{image_name}', source)
         self.assertIn('Reset session is destructive inside SCHT.', source)
         self.assertIn('class="guide-image-button"', source)
         self.assertIn('id="guideLightbox"', source)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SC Hauling Log Tracker 1.5.67
+SC Hauling Log Tracker 1.6.0
 ----------------------------
 Offline parser/GUI for Star Citizen hauling missions in Game.log.
 
@@ -10,7 +10,30 @@ profit, elapsed timers, mission profit/hr, and session profit/hr.
 
 No internet connection is required at runtime. Source desktop mode uses pywebview; packaged builds include it.
 
-1.5.67 polishes the dashboard and overlay layout, clarifies shared route handling, refines OCR notifications, and preserves every completion in same-millisecond mission stacks.
+1.6.0 promotes pickup-only contract stops to fixed starts and makes custom-route reoptimization preserve the visible draft's progress and endpoints.
+1.5.104 clears saved route workspaces with the session and recalculates failed or outdated route snapshots when contracts change.
+1.5.103 refreshes the illustrated in-app Manual for the current dashboard, Logistics, Route Planner, overlay, and correction workflows.
+1.5.102 sorts Logistics Overlay groups and rows by the active route.
+1.5.101 packs Logistics Board groups at the top and reduces separator spacing.
+1.5.100 standardizes Logistics Board card height until commodity lists require expansion.
+1.5.99 standardizes outer window and primary panel corner radii at 11 px.
+1.5.98 anchors Edit, Delete, and About close controls to the window borders.
+1.5.97 aligns Edit, Delete, and About close controls with their title text.
+1.5.96 aligns Edit, Delete, and About close controls to the overlay top-right inset.
+1.5.95 unifies overlay and modal close-control geometry, spacing, and hover behavior.
+1.5.94 makes both overlay titlebar control sets borderless and adds red modal-close hover feedback.
+1.5.93 refines Logistics destination-cell typography and removes duplicate row progress.
+1.5.92 aligns Logistics card subtitles and restores live loaded/total SCU header progress.
+1.5.91 restyles Logistics Overlay card headers around Route Overlay location, action, and cargo patterns.
+1.5.90 unifies Route and Logistics overlay controls and settings typography.
+1.5.89 improves compact-overlay system and active-leg subtitle readability.
+1.5.88 includes the active QT leg in compact-overlay distance readouts and labels it beneath the active stop.
+1.5.87 preserves the first contract's successfully imported OCR locations and payout.
+1.5.86 keeps active routes valid when live log updates only report operational progress.
+1.5.85 restyles the Logistics Board Overlay to match the compact Route Planner Overlay.
+1.5.84 streamlines pure and mixed compact-overlay commodity lines.
+1.5.73 stabilizes route-edit drag and drop by preserving timeline connectors while a reordered route is saved.
+1.5.72 refines user waypoint cards with a proper location marker and vertically centered explanatory copy.
 1.5.66 prepares the first public test release with a wider desktop layout, SCHT AppData migration, a clean Windows installer, and standalone packaging that requires no end-user Python installation.
 3.5.66 extends the Help guide navigation rail to the full guide height so its darker background remains visually continuous while the manual scrolls.
 3.5.65 replaces the placeholder Help window with an illustrated offline user guide and adds a manual-maintenance contract for future features.
@@ -76,8 +99,14 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
+from hauling_route_planner import (
+    CachedDistanceProvider, CargoOperation, DictAliasRepository,
+    LocationSearchService, RoutePlan, StaticLocationRepository, optimize_open_route, optimize_route,
+)
+from location_catalog import CatalogDistanceProvider, LocationCatalog, normalize_location_text
+
 APP_NAME = "SC Hauling Log Tracker"
-APP_VERSION = "1.5.67"
+APP_VERSION = "1.6.0"
 APP_DATA_FOLDER = "SCHT"
 LEGACY_APP_DATA_FOLDERS = ("SC Hauling Log Tracker",)
 MAIN_WINDOW_LAYOUT_VERSION = 4
@@ -87,13 +116,22 @@ MAIN_WINDOW_HARD_MIN_WIDTH = MAIN_WINDOW_PREFERRED_MIN_WIDTH
 MAIN_WINDOW_MIN_HEIGHT = 720
 
 HELP_IMAGE_ASSETS = frozenset({
-    "toolbar.jpg",
-    "dashboard.jpg",
-    "logistics_board.jpg",
-    "overlay.jpg",
-    "settings_menu.jpg",
+    "toolbar.png",
+    "session_timer.png",
+    "session_status.png",
+    "dashboard_metrics.png",
+    "contract_log.png",
+    "logistics_board.png",
+    "logistics_overlay.png",
+    "overlay_settings.png",
+    "route_planner.png",
+    "route_planner_edit.png",
+    "route_contracts.png",
+    "route_overlay.png",
+    "contract_editor.png",
+    "delete_contract.png",
+    "settings_menu.png",
     "share_menu.jpg",
-    "contract_editor.jpg",
 })
 
 
@@ -122,12 +160,110 @@ def bundled_resource_path(*parts: str) -> Path:
     root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     return root.joinpath(*parts)
 
+
+LOCATION_CATALOG = LocationCatalog.load()
+
+
+def normalized_location_payload(value: str, catalog: Optional[LocationCatalog] = None) -> dict:
+    match = (catalog or LOCATION_CATALOG).resolve(value)
+    if match.record:
+        return match.record.payload(str(value or ""), match.status)
+    original = " ".join(str(value or "").split())
+    return {
+        "id": "", "name": original, "subtitle": "Unknown location · needs mapping", "qualified_name": original,
+        "system": "", "parent": "",
+        "type": "", "original": original, "match": "unresolved", "has_position": False,
+    }
+
+
+def canonical_location_identity(value: str, catalog: Optional[LocationCatalog] = None) -> str:
+    """Return an exact grouping identity while retaining unknown raw values."""
+    match = (catalog or LOCATION_CATALOG).resolve(value)
+    return match.record.qualified_name if match.record else " ".join(str(value or "").split())
+
+
+def canonical_location_group_value(value: str, catalog: Optional[LocationCatalog] = None) -> str:
+    """Canonical board value; qualify only names that are truly ambiguous."""
+    location_catalog = catalog or LOCATION_CATALOG
+    match = location_catalog.resolve(value)
+    if not match.record:
+        return " ".join(str(value or "").split())
+    # Preserve untouched Game.log spelling. Editor choices are explicitly
+    # qualified, so only those need collapsing to the catalog display name.
+    if match.status != "qualified":
+        return " ".join(str(value or "").split())
+    same_name = location_catalog.by_name.get(normalize_location_text(match.record.name), [])
+    return match.record.qualified_name if len(same_name) > 1 else match.record.name
+
+
+def canonicalize_contract_objective_locations(objectives, catalog: Optional[LocationCatalog] = None) -> list:
+    """Use canonical catalog names for recognized editor/OCR locations.
+
+    Unknown values remain untouched so a user can still save a newly introduced
+    or currently unmapped game location instead of losing the correction.
+    """
+    location_catalog = catalog or LOCATION_CATALOG
+    canonicalized = []
+    for raw in objectives or []:
+        if isinstance(raw, dict):
+            item = dict(raw)
+            for field in ("pickup", "dropoff"):
+                value = str(item.get(field) or "").strip()
+                match = location_catalog.resolve(value)
+                if match.record:
+                    item[field] = match.record.qualified_name
+            canonicalized.append(item)
+        elif isinstance(raw, (list, tuple)):
+            item = list(raw)
+            for index in (0, 1):
+                if index >= len(item):
+                    continue
+                match = location_catalog.resolve(str(item[index] or "").strip())
+                if match.record:
+                    item[index] = match.record.qualified_name
+            canonicalized.append(item)
+        else:
+            canonicalized.append(raw)
+    return canonicalized
+
+
+def restore_contract_objective_metadata(objectives, base_group: Sequence["CargoMission"]) -> list:
+    """Restore parser provenance that an older editor save may have omitted."""
+    restored = []
+    for index, raw in enumerate(objectives or []):
+        if not isinstance(raw, dict):
+            restored.append(raw)
+            continue
+        item = dict(raw)
+        pickup_identity = canonical_location_identity(item.get("pickup") or "")
+        commodity_key = normalize_commodity_name(item.get("commodity") or "").casefold()
+        source = next((
+            mission for mission in base_group
+            if canonical_location_identity(mission.pickup) == pickup_identity
+            and (not commodity_key or mission.commodity.casefold() == commodity_key)
+        ), None)
+        if source is None and index < len(base_group):
+            source = base_group[index]
+        if source is not None:
+            if str(item.get("pickup_source_section") or "other") == "other" and source.pickup_source_section != "other":
+                item["pickup_source_section"] = source.pickup_source_section
+            if item.get("pickup_source_order") is None and source.pickup_source_order is not None:
+                item["pickup_source_order"] = source.pickup_source_order
+            if not item.get("pickup_raw_text") and source.pickup_raw_text:
+                item["pickup_raw_text"] = source.pickup_raw_text
+            if not item.get("pickup_parent") and source.pickup_parent:
+                item["pickup_parent"] = source.pickup_parent
+        restored.append(item)
+    return restored
+
 RANK_WORDS = ["trainee", "rookie", "junior", "member", "experienced", "senior", "master"]
 
 KNOWN_LOCATION_HINTS = [
     "Everus Harbor", "Teasa Spaceport", "Lorville", "Baijini Point", "Riker Memorial Spaceport",
     "Area18", "Port Tressler", "New Babbage", "Seraphim Station", "Orison", "August Dunlow Spaceport",
-    "Grim HEX", "Pyro Gateway", "Stanton Gateway",
+    "Grim HEX", "Pyro Gateway", "Stanton Gateway", "Fallow Field", "Ashland",
+    "The Golden Riviera", "Endgame", "Endgame at the L3 Lagrange of Pyro VI",
+    "Gaslight at the L2 Lagrange of Pyro V", "Ruin Station above Pyro VI",
     "HDPC-Farnesway", "HDPC-Cassillo", "Sakura Sun Magnolia Workcenter",
     "Covalex Distribution Center S1DC06", "Shubin Mining Facility SMO-10",
     "HDMS-Hahn", "HDMS-Perlman", "HDMS-Bezdek", "HDMS-Lathan",
@@ -530,6 +666,14 @@ class CargoMission:
     scu_provenance: str = "unknown"
     payout_provenance: str = "unknown"
     quantity_scope: str = "per_route"
+    pickup_source_section: str = "other"
+    pickup_source_order: Optional[int] = None
+    pickup_raw_text: str = ""
+    pickup_parent: str = ""
+    # Ordered pickup names read from Primary Objectives. Repeated names are
+    # significant: the in-game bug presents several Details locations but
+    # repeats the one operational pickup in this list.
+    primary_pickup_occurrences: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         self.commodity = normalize_commodity_name(self.commodity)
@@ -708,6 +852,15 @@ def normalize_contract_overrides(payload: Optional[dict]) -> dict:
                 "scu": scu,
                 "provenance": provenance,
                 "quantity_scope": quantity_scope,
+                "pickup_source_section": str(item.get("pickup_source_section") or "other") if isinstance(item, dict) else "other",
+                "pickup_source_order": item.get("pickup_source_order") if isinstance(item, dict) else None,
+                "pickup_raw_text": str(item.get("pickup_raw_text") or "") if isinstance(item, dict) else "",
+                "pickup_parent": str(item.get("pickup_parent") or "") if isinstance(item, dict) else "",
+                "primary_pickup_occurrences": [
+                    clean(str(value or ""), 12)
+                    for value in (item.get("primary_pickup_occurrences") or [])
+                    if clean(str(value or ""), 12)
+                ] if isinstance(item, dict) else [],
             })
 
         # The editor can represent a shared quantity without exposing a separate
@@ -735,6 +888,8 @@ def normalize_contract_overrides(payload: Optional[dict]) -> dict:
             normalized[mission_id] = {"payout": payout, "objectives": objectives, "source": source}
             if contracted_by:
                 normalized[mission_id]["contracted_by"] = contracted_by
+            if source == "ocr" and bool(raw.get("validated")):
+                normalized[mission_id]["validated"] = True
     return normalized
 
 
@@ -792,6 +947,11 @@ def apply_contract_overrides(missions: Sequence[CargoMission], overrides: Option
                 scu_provenance=provenance if item["scu"] else "unknown",
                 payout_provenance=source if payout is not None else first.payout_provenance,
                 quantity_scope=str(item.get("quantity_scope") or "per_route"),
+                pickup_source_section=str(item.get("pickup_source_section") or "other"),
+                pickup_source_order=item.get("pickup_source_order"),
+                pickup_raw_text=str(item.get("pickup_raw_text") or ""),
+                pickup_parent=str(item.get("pickup_parent") or ""),
+                primary_pickup_occurrences=tuple(item.get("primary_pickup_occurrences") or ()),
             )
             output.append(row)
     return merge_missions(output)
@@ -799,6 +959,8 @@ def apply_contract_overrides(missions: Sequence[CargoMission], overrides: Option
 
 def known_location_names(extra: Optional[Sequence[str]] = None) -> List[str]:
     out: List[str] = []
+    # OCR parsing stays deliberately curated; the full catalog contains many
+    # generic names that would otherwise match ordinary contract prose.
     for loc in KNOWN_LOCATION_HINTS + [name for name, _coords in KNOWN_MARKER_LOCATIONS] + list(extra or []):
         loc = clean(str(loc or ""), 16)
         if loc and loc not in out and not loc.lower().startswith("unknown"):
@@ -1097,10 +1259,40 @@ def parse_contract_details_text(text: str, hints: Optional[Sequence[dict]] = Non
     hint_dropoffs = [str(h.get("dropoff") or "") for h in hints if isinstance(h, dict)]
     hint_commodities = [str(h.get("commodity") or "") for h in hints if isinstance(h, dict)]
     locations = known_location_names([*hint_pickups, *hint_dropoffs])
+    # Procedural Pyro outposts are not all present in the curated OCR hint list.
+    # Learn their names directly from the stable Details sentence so the same
+    # names can be recognized later in Primary Objectives.
+    for match in re.finditer(
+        r"(?i)Freight\s+elevator\s+at\s+([A-Za-z0-9&'’\x07 .\-]{2,80}?)\s+on\s+(?:Pyro|Stanton|Nyx)\b",
+        raw,
+    ):
+        discovered = clean(match.group(1).replace("\x07", "'"), 16)
+        if discovered and discovered not in locations:
+            locations.append(discovered)
+    locations.sort(key=len, reverse=True)
     commodities = known_commodity_names(hint_commodities)
     payout = parse_reward_amount(raw)
     contracted_by = parse_contracted_by(raw)
     objective_text = primary_objectives_section(raw)
+
+    # The mission workaround must follow the visual Details order, never marker
+    # or Objectives order. OCR text preserves line order; image OCR crops are
+    # already emitted top-to-bottom by Windows OCR.
+    details_pickups: List[dict] = []
+    details_match = re.search(
+        r"(?is)PICK\s*UP\s+LOCATIONS?\s*(?:\(\s*ANY\s+ORDER\s*\))?\s*[:\-]?\s*(?P<body>.+?)"
+        r"(?=\n\s*(?:DROP\s*OFF|DELIVER|PRIMARY\s+OBJECTIVES|REWARDS?|CONTRACTED\s+BY)\b|$)",
+        raw,
+    )
+    if details_match:
+        body = details_match.group("body")
+        candidates = []
+        for name in locations:
+            found = re.search(re.escape(name), body, re.I)
+            if found:
+                candidates.append((found.start(), name, found.group(0)))
+        for order, (_offset, name, raw_name) in enumerate(sorted(candidates), 1):
+            details_pickups.append({"name": name, "source_order": order, "raw_text": raw_name})
 
     def find_name(line: str, names: Sequence[str]) -> str:
         compact_line = re.sub(r"\s+", " ", line).lower()
@@ -1114,7 +1306,23 @@ def parse_contract_details_text(text: str, hints: Optional[Sequence[dict]] = Non
                 return name
         return ""
 
+    # Details describes every advertised pickup. Primary Objectives is the
+    # authoritative live list and exposes the known bug by repeating one pickup
+    # in place of the other advertised locations.
+    primary_pickups: List[str] = []
+    for segment in re.split(r"(?i)\bCollect\b", objective_text)[1:]:
+        candidate = find_name(segment[:180], locations)
+        if candidate:
+            primary_pickups.append(candidate)
+
     rows: List[dict] = parse_primary_objective_rows(objective_text, locations, commodities, hints)
+    details_by_name = {ocr_compact(item["name"]): item for item in details_pickups}
+    for row in rows:
+        detail = details_by_name.get(ocr_compact(row.get("pickup") or ""))
+        if detail:
+            row["pickup_source_section"] = "details"
+            row["pickup_source_order"] = detail["source_order"]
+            row["pickup_raw_text"] = detail["raw_text"]
     seen = set()
     lines = [ln.strip() for ln in re.split(r"[\r\n]+", objective_text) if ln.strip()]
     amount_pat = re.compile(r"\b(?P<scu>\d+(?:\.\d+)?)\s*(?:SCU|5CU|S\.?C\.?U\.?)\b", re.I)
@@ -1168,7 +1376,12 @@ def parse_contract_details_text(text: str, hints: Optional[Sequence[dict]] = Non
         if mapped_rows:
             rows = mapped_rows
 
-    return {"payout": payout, "contracted_by": contracted_by, "objectives": rows, "text": raw}
+    return {
+        "payout": payout, "contracted_by": contracted_by, "objectives": rows, "text": raw,
+        "details_pickups": details_pickups,
+        "details_order_confident": len(details_pickups) > 1,
+        "primary_pickup_occurrences": primary_pickups,
+    }
 
 
 def windows_ocr_image(image_path: Path, timeout_seconds: int = 25) -> str:
@@ -1354,6 +1567,16 @@ def merge_contract_ocr_passes(
             continue
         seen.add(key)
         rows.append(dict(item))
+    details_metadata = {
+        ocr_compact(str(item.get("pickup") or "")): item
+        for item in (full_parsed.get("objectives") or [])
+        if item.get("pickup_source_section") == "details"
+    }
+    for row in rows:
+        metadata = details_metadata.get(ocr_compact(str(row.get("pickup") or "")))
+        if metadata:
+            for field in ("pickup_source_section", "pickup_source_order", "pickup_raw_text", "pickup_parent"):
+                row[field] = metadata.get(field)
     payout = full_parsed.get("payout")
     if payout is None and reward_text:
         payout = parse_reward_amount("Reward " + reward_text)
@@ -1370,6 +1593,11 @@ def merge_contract_ocr_passes(
         "contracted_by": contracted_by,
         "objectives": rows,
         "text": review_text.strip(),
+        "primary_pickup_occurrences": list(
+            full_parsed.get("primary_pickup_occurrences")
+            or crop_parsed.get("primary_pickup_occurrences")
+            or []
+        ),
     }
 
 
@@ -2248,6 +2476,88 @@ def group_active(group: Sequence[CargoMission]) -> bool:
     return not group_completed(group) and not group_abandoned(group)
 
 
+def route_operation_identity(mission: CargoMission, index: int) -> str:
+    """Return the stable operation id shared by route planning and staleness checks."""
+    seed = "\x1f".join(mission.stable_key()) + f"\x1f{index}"
+    return hashlib.sha1(seed.encode("utf-8", errors="replace")).hexdigest()[:20]
+
+
+def route_plan_contract_inputs_match(plan: dict, missions: Sequence[CargoMission]) -> bool:
+    """Check cargo topology without treating load/delivery progress as an input change."""
+    if not plan or not plan.get("valid"):
+        return True
+    planned_operations = [
+        operation
+        for stop in plan.get("stops") or []
+        for operation in [*(stop.get("pickups") or []), *(stop.get("deliveries") or [])]
+        if operation.get("id")
+    ]
+    planned_ids = {str(operation["id"]) for operation in planned_operations}
+    included_contracts = {
+        str(value).casefold() for value in plan.get("included_contract_ids") or [] if str(value).strip()
+    } | {
+        str(operation.get("contract_id") or "").casefold()
+        for operation in planned_operations if str(operation.get("contract_id") or "").strip()
+    }
+    selected_contracts = {
+        str(value).casefold() for value in plan.get("selected_contracts") or [] if str(value).strip()
+    }
+    scope = str(plan.get("scope") or "all").casefold()
+    current_ids = set()
+    for group in contract_groups(missions):
+        if not group:
+            continue
+        contract_id = str(group[0].mission_id or group[0].contract_uid or "").casefold()
+        relevant_active = group_active(group) and (
+            scope == "all" or contract_id in selected_contracts
+        )
+        if contract_id not in included_contracts and not relevant_active:
+            continue
+        current_ids.update(route_operation_identity(mission, index) for index, mission in enumerate(group))
+    return current_ids == planned_ids
+
+
+def route_plan_can_be_reused(
+    plan: Optional[dict], missions: Sequence[CargoMission], scope: str,
+    selected_contracts: Sequence[str] = (),
+) -> bool:
+    """Return whether a saved workspace is a current successful calculation."""
+    if not plan or not plan.get("valid") or plan.get("outdated"):
+        return False
+    normalized_scope = str(scope or "all").casefold()
+    if str(plan.get("scope") or "all").casefold() != normalized_scope:
+        return False
+    if normalized_scope == "selected":
+        planned = {
+            str(value).strip().casefold()
+            for value in plan.get("selected_contracts") or [] if str(value).strip()
+        }
+        requested = {
+            str(value).strip().casefold()
+            for value in selected_contracts if str(value).strip()
+        }
+        if planned != requested:
+            return False
+    return route_plan_contract_inputs_match(plan, missions)
+
+
+def route_endpoint_promotion_index(stops: Sequence[dict], location_id: str, endpoint: str) -> Optional[int]:
+    """Find a cargo-only stop that can safely become a fixed route endpoint."""
+    location_id = str(location_id or "")
+    endpoint = str(endpoint or "").casefold()
+    if not location_id or endpoint not in {"start", "end"}:
+        return None
+    required_key, forbidden_key = ("pickups", "deliveries") if endpoint == "start" else ("deliveries", "pickups")
+    for index, stop in enumerate(stops):
+        if str(stop.get("location_id") or "") != location_id:
+            continue
+        if stop.get("historical") or str(stop.get("completion_state") or "").casefold() == "complete":
+            continue
+        if stop.get(required_key) and not stop.get(forbidden_key):
+            return index
+    return None
+
+
 def apply_event_to_group(group: Sequence[CargoMission], ev: CompletionEvent, mark_completed: bool, mark_abandoned: bool = False) -> None:
     for m in group:
         if mark_abandoned:
@@ -2348,6 +2658,35 @@ def parse_log_data(text: str) -> Tuple[List[CargoMission], List[CompletionEvent]
         parsed.extend(parse_block(source_line, block))
     missions = merge_missions(parsed)
     missions = apply_contract_overrides(missions, VERIFIED_MISSION_OVERRIDES)
+    # Synthetic debug manifests can preserve the game's shared multi-pickup
+    # presentation without inventing a quantity for every pickup. Real Game.log
+    # data never emits DebugContractSummary, so this cannot alter live parsing.
+    synthetic_shared = {
+        match.group("mission").casefold(): match.group("scu")
+        for match in re.finditer(
+            r"<DebugContractSummary>\s+MissionId\s*\[(?P<mission>[^\]]+)\]\s+"
+            r"known shared total\s*\[(?P<scu>\d+(?:\.\d+)?)\s+SCU\]",
+            text,
+            re.I,
+        )
+    }
+    if synthetic_shared:
+        for group in contract_groups(missions):
+            mission_id = (group[0].mission_id or "").casefold()
+            shared_scu = synthetic_shared.get(mission_id)
+            if shared_scu is None or len({mission.pickup for mission in group}) < 2:
+                continue
+            owner = next((mission for mission in group if mission.scu and mission.scu != "0"), group[0])
+            for mission in group:
+                mission.quantity_scope = "aggregate"
+                mission.scu = shared_scu if mission is owner else ""
+                mission.scu_provenance = "exact_log" if mission is owner else "unknown"
+            # The synthetic manifest lists pickup rows in the same order as the
+            # contract Details panel. This marker is debug-only and never occurs
+            # in a real Game.log, so it safely exercises the automatic workaround.
+            for pickup_order, mission in enumerate(group, 1):
+                mission.pickup_source_section = "details"
+                mission.pickup_source_order = pickup_order
     events = parse_completion_events(lines)
     apply_completion_events(missions, events)
     return missions, events
@@ -2521,6 +2860,21 @@ def logistics_board(missions: Sequence[CargoMission]) -> Tuple[str, str, str, Li
     return mode, fixed_text, axis_label, commodities, columns, totals
 
 
+def logistics_member_identity(mission: CargoMission) -> str:
+    """Stable cargo identity shared by Logistics and Route Planner.
+
+    Editor values may be catalog-qualified while untouched log values use the
+    short display name.  Logistics groups those forms canonically, so route
+    completion must use the same canonical form as the persisted checklist id.
+    """
+    canonical = replace(
+        mission,
+        pickup=canonical_location_group_value(mission.pickup),
+        dropoff=canonical_location_group_value(mission.dropoff),
+    )
+    return "\x1f".join(canonical.stable_key())
+
+
 def logistics_sections(missions: Sequence[CargoMission]) -> List[dict]:
     """Build separate accepted-only route groups around repeated locations.
 
@@ -2538,7 +2892,19 @@ def logistics_sections(missions: Sequence[CargoMission]) -> List[dict]:
     """
     active_rows: List[CargoMission] = []
     aggregate_sections: List[dict] = []
-    for group in contract_groups(missions):
+    for raw_group in contract_groups(missions):
+        # Editors store a qualified catalog value (name + hierarchy/system) so
+        # duplicate names stay unambiguous. Log-derived rows may still contain
+        # only the short name. Convert both forms to the same qualified identity
+        # before grouping; presentation is normalized back to name + subtitle.
+        group = [
+            replace(
+                mission,
+                pickup=canonical_location_group_value(mission.pickup),
+                dropoff=canonical_location_group_value(mission.dropoff),
+            )
+            for mission in raw_group
+        ]
         if not group_active(group):
             continue
 
@@ -2561,7 +2927,7 @@ def logistics_sections(missions: Sequence[CargoMission]) -> List[dict]:
                 value = float(str(aggregate_owner.scu).strip())
                 columns_payload = []
                 for pickup, mission in pickup_rows:
-                    member_identity = "\x1f".join(mission.stable_key())
+                    member_identity = logistics_member_identity(mission)
                     checklist_id = hashlib.sha1(
                         ("aggregate-pickup\n" + member_identity).encode("utf-8", errors="replace")
                     ).hexdigest()[:20]
@@ -2569,6 +2935,7 @@ def logistics_sections(missions: Sequence[CargoMission]) -> List[dict]:
                         "location": pickup,
                         "items": [{
                             "id": checklist_id,
+                            "member_identities": [member_identity],
                             "commodity": commodity,
                             "scu": "",
                             "scu_value": 0.0,
@@ -2718,7 +3085,7 @@ def logistics_sections(missions: Sequence[CargoMission]) -> List[dict]:
             # A stable checklist identity follows the actual active objective(s),
             # not only the visible route text. This prevents a later identical
             # contract from inheriting an old checked state after the first one closes.
-            aggregate_members.setdefault(item_axis, []).append("\x1f".join(mission.stable_key()))
+            aggregate_members.setdefault(item_axis, []).append(logistics_member_identity(mission))
 
         columns_payload = []
         section_total = 0.0
@@ -2734,6 +3101,7 @@ def logistics_sections(missions: Sequence[CargoMission]) -> List[dict]:
                 checklist_id = hashlib.sha1(member_identity.encode("utf-8", errors="replace")).hexdigest()[:20]
                 items.append({
                     "id": checklist_id,
+                    "member_identities": sorted(aggregate_members.get((column, commodity), [])),
                     "commodity": commodity,
                     "scu": format_scu(value),
                     "scu_value": value,
@@ -2761,6 +3129,143 @@ def format_scu(value: float) -> str:
     if abs(value - int(value)) < 0.001:
         return str(int(value))
     return f"{value:.1f}".rstrip("0").rstrip(".")
+
+
+def contract_location_id(mission: CargoMission, role: str, source_order: Optional[int] = None) -> str:
+    """Stable identifier for a captured location; raw mission rows are untouched."""
+    identity = "\x1f".join([
+        (mission.mission_id or mission.contract_uid or mission.title).casefold(),
+        role.casefold(),
+        str(source_order if source_order is not None else ""),
+        (mission.pickup if role == "pickup" else mission.dropoff).casefold(),
+    ])
+    return hashlib.sha1(identity.encode("utf-8", errors="replace")).hexdigest()[:20]
+
+
+def normalize_location_overrides(payload: Optional[dict]) -> dict:
+    result = {"version": 1, "contracts": {}}
+    raw_contracts = (payload or {}).get("contracts") if isinstance(payload, dict) else {}
+    for mission_id, item in (raw_contracts or {}).items():
+        if not isinstance(item, dict):
+            continue
+        key = str(mission_id or "").strip().casefold()
+        mode = str(item.get("mode") or "disabled").casefold()
+        if not key or mode not in {"inherit", "enabled", "disabled"}:
+            continue
+        normalized = {
+            "mode": mode,
+            "selected_pickup_id": str(item.get("selected_pickup_id") or ""),
+            "selected_pickup_name": str(item.get("selected_pickup_name") or ""),
+            "changed_by": "user" if str(item.get("changed_by") or "") == "user" else "automatic",
+        }
+        overrides = []
+        for override in item.get("overrides") or []:
+            if not isinstance(override, dict) or not override.get("contract_location_id"):
+                continue
+            overrides.append({
+                "contract_location_id": str(override["contract_location_id"]),
+                "ignored": bool(override.get("ignored")),
+                "reason": str(override.get("reason") or "known_multi_pickup_bug"),
+                "changed_by": "user" if str(override.get("changed_by") or "") == "user" else "automatic",
+            })
+        normalized["overrides"] = overrides
+        result["contracts"][key] = normalized
+    return result
+
+
+def multi_pickup_bug_assessment(group: Sequence[CargoMission]) -> dict:
+    pickups = []
+    dropoffs = []
+    commodities = []
+    for mission in group:
+        if mission.pickup and mission.pickup not in pickups: pickups.append(mission.pickup)
+        if mission.dropoff and mission.dropoff not in dropoffs: dropoffs.append(mission.dropoff)
+        if mission.commodity and mission.commodity not in commodities: commodities.append(mission.commodity)
+    aggregate_owner = next((mission for mission in group if mission.is_aggregate_load_plannable()), None)
+    ordered = sorted(
+        [mission for mission in group if mission.pickup_source_section == "details" and mission.pickup_source_order is not None],
+        key=lambda mission: int(mission.pickup_source_order or 0),
+    )
+    ordered_names = list(dict.fromkeys(mission.pickup for mission in ordered))
+    shape_matches = len(pickups) > 1 and len(dropoffs) == 1 and len(commodities) == 1 and aggregate_owner is not None
+    primary_occurrences = next(
+        (list(mission.primary_pickup_occurrences) for mission in group if mission.primary_pickup_occurrences),
+        [],
+    )
+    primary_keys = [ocr_compact(name) for name in primary_occurrences if name]
+    pickup_by_key = {ocr_compact(mission.pickup): mission for mission in group if mission.pickup}
+    repeated_primary_key = primary_keys[0] if primary_keys and len(set(primary_keys)) == 1 else ""
+    # Multiple Details pickups are normal. Automatic correction is safe only
+    # when Primary Objectives contains one entry per Details pickup and repeats
+    # the same operational pickup every time.
+    confident = bool(
+        shape_matches
+        and len(primary_keys) == len(pickups)
+        and repeated_primary_key
+        and repeated_primary_key in pickup_by_key
+    )
+    # The settings toggle is an explicit request to apply the known workaround,
+    # whose documented behavior is "final Details pickup only".  Keep the
+    # confidence flag for automatic diagnostics, but always expose that ordered
+    # Details candidate when it is available so the global switch can act.
+    selected = pickup_by_key.get(repeated_primary_key) if confident else (
+        ordered[-1] if shape_matches and ordered else (group[-1] if shape_matches and group else None)
+    )
+    return {
+        "matches_shape": shape_matches,
+        "confident": confident,
+        "warning": "" if confident or not shape_matches else "No repeated Primary Objectives pickup was confirmed; all pickup locations remain active.",
+        "selected_pickup_id": contract_location_id(selected, "pickup", selected.pickup_source_order) if selected else "",
+        "selected_pickup_name": selected.pickup if selected else "",
+        "pickup_count": len(pickups),
+        "primary_pickup_occurrences": primary_occurrences,
+    }
+
+
+def operational_contracts(missions: Sequence[CargoMission], override_store: Optional[dict]) -> Tuple[List[CargoMission], dict]:
+    """Apply contract location overrides once for all downstream consumers."""
+    contracts = normalize_location_overrides(override_store).get("contracts", {})
+    output: List[CargoMission] = []
+    notices = {}
+    for group in contract_groups(missions):
+        first = group[0]
+        mission_id = (first.mission_id or "").casefold()
+        config = contracts.get(mission_id) or {"mode": "disabled"}
+        assessment = multi_pickup_bug_assessment(group)
+        enabled = config.get("mode") == "enabled"
+        selected_id = str(config.get("selected_pickup_id") or "")
+        selected_name = str(config.get("selected_pickup_name") or "")
+        if enabled and not selected_id and assessment.get("selected_pickup_id"):
+            selected_id = assessment["selected_pickup_id"]
+            selected_name = assessment["selected_pickup_name"]
+        selected = None
+        if enabled:
+            for mission in group:
+                location_id = contract_location_id(mission, "pickup", mission.pickup_source_order)
+                if (selected_id and location_id == selected_id) or (selected_name and mission.pickup.casefold() == selected_name.casefold()):
+                    selected = mission; break
+        if enabled and selected and assessment["matches_shape"]:
+            owner = next((mission for mission in group if mission.is_aggregate_load_plannable()), None)
+            operational = selected
+            if owner is not None and selected is not owner:
+                operational = replace(
+                    selected, scu=owner.scu, scu_provenance=owner.scu_provenance,
+                    # Once the phantom alternatives are filtered, this is a
+                    # normal one-pickup cargo operation. Keeping it aggregate
+                    # would make the Logistics Board render one shared section
+                    # per contract instead of grouping the common pickup.
+                    quantity_scope="per_route",
+                )
+            elif operational.quantity_scope == "aggregate":
+                operational = replace(operational, quantity_scope="per_route")
+            output.append(operational)
+            hidden = max(0, assessment["pickup_count"] - 1)
+            notices[mission_id] = {"active": True, "hidden_count": hidden, "warning": "", "selected_pickup": selected.pickup}
+        else:
+            output.extend(group)
+            warning = assessment["warning"] if enabled and not selected else ""
+            notices[mission_id] = {"active": False, "hidden_count": 0, "warning": warning, "selected_pickup": ""}
+    return output, notices
 
 
 def active_quantity_summary(missions: Sequence[CargoMission]) -> dict:
@@ -2795,6 +3300,27 @@ def active_quantity_summary(missions: Sequence[CargoMission]) -> dict:
         "aggregate_rows": aggregate,
         "summary": " + ".join(parts[:2]) + (f" · {parts[2]}" if len(parts) > 2 else ""),
     }
+
+
+def loaded_logistics_member_identities(sections: Sequence[dict], checklist: dict) -> List[str]:
+    """Return objective identities represented by currently checked cargo rows.
+
+    Checklist ids are presentation/grouping ids and may change when Logistics
+    regrouping changes.  Route operations retain the stable objective identity,
+    so translating the current checklist back to those identities keeps route
+    completion synchronized with the live board.
+    """
+    loaded = set()
+    for section in sections or []:
+        for column in section.get("columns") or []:
+            for item in column.get("items") or []:
+                item_id = str(item.get("id") or "")
+                if not item_id or not checklist.get(item_id):
+                    continue
+                for member_identity in item.get("member_identities") or []:
+                    if member_identity:
+                        loaded.add(str(member_identity))
+    return sorted(loaded)
 
 
 def session_stats(missions: Sequence[CargoMission], started_at: float, session_elapsed_override: Optional[float] = None) -> Tuple[int, int, int, float, float, float, float]:
@@ -3916,7 +4442,7 @@ OVERLAY_HTML = r'''<!doctype html>
 .settings-menu{position:absolute;z-index:40;top:39px;right:7px;width:230px;padding:10px;border:1px solid rgba(151,137,235,.34);border-radius:11px;background:#171622;box-shadow:0 16px 34px rgba(0,0,0,.58);transform-origin:top right}.settings-menu[hidden]{display:none}.settings-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:9px}.settings-head strong{font-size:10px;font-weight:950}.settings-head small{color:var(--muted);font-size:7px;text-transform:uppercase;letter-spacing:.4px}.setting-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;min-height:36px;padding:6px 1px;border-top:1px solid rgba(255,255,255,.055)}.setting-row:first-of-type{border-top:0}.setting-copy strong{display:block;font-size:9px;font-weight:850}.setting-copy small{display:block;margin-top:2px;color:var(--muted);font-size:7.5px;line-height:1.25}.opacity-control{display:flex;align-items:center;gap:7px}.opacity-control input{width:82px;accent-color:var(--purple)}.opacity-value{width:31px;text-align:right;color:#dfe2f6;font:800 8px Consolas,monospace}.switch{position:relative;width:34px;height:19px;padding:0;border:1px solid #4b4960;border-radius:99px;background:#11111a;cursor:pointer;transition:.15s}.switch:after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:#9297aa;transition:.15s}.switch[aria-pressed="true"]{border-color:rgba(73,237,160,.55);background:rgba(73,237,160,.16)}.switch[aria-pressed="true"]:after{left:17px;background:var(--green);box-shadow:0 0 8px rgba(73,237,160,.25)}
 .summary{position:relative;z-index:4;display:grid;grid-template-columns:1fr auto;gap:9px;align-items:center;padding:8px 11px;border-bottom:1px solid rgba(255,255,255,.055);background:rgba(255,255,255,.018)}.progress-copy strong{display:block;color:var(--blue);font:900 15px Consolas,monospace}.progress-copy small{display:block;margin-top:2px;color:var(--muted);font-size:8px;font-weight:900;text-transform:uppercase;letter-spacing:.45px}.summary.complete .progress-copy strong,.summary.complete .progress-copy small{color:var(--green)}.summary-actions{display:flex;align-items:center;gap:6px}.small-btn{height:27px;border:1px solid rgba(255,255,255,.10);border-radius:8px;background:#151520;color:#c7cbdf;padding:0 9px;font-family:"Segoe UI Variable Text","Segoe UI",Arial,sans-serif;font-size:var(--type-control);font-weight:var(--weight-control);line-height:1;text-transform:none;letter-spacing:.01em;font-kerning:normal;-webkit-font-smoothing:antialiased;cursor:pointer}.small-btn:hover,.small-btn.active{border-color:rgba(143,118,255,.52);color:#fff}.small-btn.active{background:rgba(90,167,255,.11)}.small-btn:disabled{opacity:.38;cursor:default}
 .board{min-height:0;overflow:auto;padding:8px;scrollbar-width:thin;scrollbar-color:#45405e transparent;overscroll-behavior:contain;overflow-anchor:none;scroll-behavior:auto}.empty{padding:28px 16px;text-align:center;color:var(--muted);font-size:10px;line-height:1.45;border:1px dashed var(--line);border-radius:11px}.group{border:1px solid var(--line);border-radius:11px;overflow:hidden;background:rgba(23,22,34,.70)}.group+.group{margin-top:9px}.group-head{padding:9px 10px;background:rgba(143,118,255,.065);border-bottom:1px solid var(--line)}.group-head small{display:block;color:#ad96ff;font-size:7.5px;font-weight:950;text-transform:uppercase;letter-spacing:.55px}.group-head strong{display:block;margin-top:3px;font-size:12px;font-weight:950;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.group-head span{display:block;margin-top:3px;color:var(--muted);font-size:8px}.route{padding:8px 9px}.route.empty-route{display:none}.route+.route{border-top:1px solid rgba(255,255,255,.055)}.route-title{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}.route-title strong{font-size:8.5px;text-transform:uppercase;letter-spacing:.28px;color:#dfe2f4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.route-title span{font:800 8px Consolas,monospace;color:var(--muted);white-space:nowrap}.cargo-row{display:grid;grid-template-columns:18px 18px minmax(0,1fr) auto;gap:7px;align-items:center;min-height:34px;padding:5px 4px;border-radius:8px;cursor:pointer;user-select:none}.cargo-row:hover{background:rgba(90,167,255,.055)}.cargo-row.loaded{color:var(--green);background:rgba(73,237,160,.04)}.cargo-row.loaded .cargo-name,.cargo-row.loaded .scu{opacity:.56}.cargo-row.loaded .cargo-name{text-decoration:line-through}.compact .cargo-row{min-height:28px;padding:3px 4px}.compact .route{padding:6px 8px}.compact .group-head{padding:7px 9px}.box{width:17px;height:17px;border:1px solid #514d69;border-radius:5px;background:#101018;display:grid;place-items:center}.box:after{content:"";width:8px;height:4px;border-left:2px solid #07120d;border-bottom:2px solid #07120d;transform:rotate(-45deg) scale(0)}.cargo-row.loaded .box{background:var(--green);border-color:var(--green);box-shadow:0 0 10px rgba(73,237,160,.22)}.cargo-row.loaded .box:after{transform:rotate(-45deg) scale(1)}.cargo-icon{width:16px;height:16px;fill:currentColor;filter:drop-shadow(0 0 3px currentColor)}.cargo-name{font-size:10px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.scu{font:900 10px Consolas,monospace;color:var(--blue);white-space:nowrap}.cargo-row.loaded .scu{color:var(--green)}
-.overlay-location{display:flex!important;align-items:center;gap:7px;min-width:0}.overlay-location .route-icon{display:block;width:10px;height:10px;flex:0 0 10px;fill:currentColor;opacity:.92}.overlay-location.pickup-route .route-icon{color:#6f9bd1}.overlay-location.dropoff-route .route-icon{color:#8979d8}.overlay-location .location-text{display:block;min-width:0;margin-top:0!important;color:inherit!important;font:inherit!important;letter-spacing:inherit;overflow:hidden;text-overflow:ellipsis}
+.overlay-location{display:flex!important;align-items:center;gap:7px;min-width:0}.overlay-location .route-icon{display:block;width:10px;height:10px;flex:0 0 10px;fill:currentColor;opacity:.92}.overlay-location.pickup-route .route-icon{color:#6f9bd1}.overlay-location.dropoff-route .route-icon{color:#8979d8}.overlay-location .location-text{display:block;min-width:0;margin-top:0!important;color:inherit!important;font:inherit!important;letter-spacing:inherit;overflow:hidden;text-overflow:ellipsis}.overlay-location .location-stack{display:grid;min-width:0}.overlay-location .location-name{overflow:hidden;text-overflow:ellipsis}.overlay-location .location-subtitle{margin-top:2px;color:#737b94;font-size:7px;font-weight:650;line-height:1;overflow:hidden;text-overflow:ellipsis}.overlay-location .unresolved-location .location-name,.overlay-location .unresolved-location .location-subtitle{color:#e8aa43}
 .footer{position:relative;z-index:4;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 9px;border-top:1px solid var(--line);background:rgba(15,15,23,.96);color:var(--muted);font-size:7.5px;font-weight:800}.footer .live{color:var(--green)}.resize-note{display:none}.size-unlocked .resize-note{display:inline}.size-unlocked .default-note{display:none}.shell:after{content:"";display:none;position:absolute;right:2px;bottom:2px;width:9px;height:9px;border-right:2px solid rgba(143,118,255,.55);border-bottom:2px solid rgba(143,118,255,.55);pointer-events:none}.size-unlocked .shell:after{display:block}
 .resize-handle{display:none;position:fixed;z-index:90;background:transparent;touch-action:none}.size-unlocked .resize-handle{display:block}.resize-handle[data-resize="n"]{left:10px;right:10px;top:0;height:7px;cursor:ns-resize}.resize-handle[data-resize="s"]{left:10px;right:10px;bottom:0;height:7px;cursor:ns-resize}.resize-handle[data-resize="w"]{left:0;top:10px;bottom:10px;width:7px;cursor:ew-resize}.resize-handle[data-resize="e"]{right:0;top:10px;bottom:10px;width:7px;cursor:ew-resize}.resize-handle[data-resize="nw"]{left:0;top:0;width:14px;height:14px;cursor:nwse-resize}.resize-handle[data-resize="ne"]{right:0;top:0;width:14px;height:14px;cursor:nesw-resize}.resize-handle[data-resize="sw"]{left:0;bottom:0;width:14px;height:14px;cursor:nesw-resize}.resize-handle[data-resize="se"]{right:0;bottom:0;width:14px;height:14px;cursor:nwse-resize}
 /* Unified overlay typography: three text sizes and two weights. */
@@ -3928,33 +4454,40 @@ OVERLAY_HTML = r'''<!doctype html>
 .scu{font:var(--weight-strong) var(--type-ui) Consolas,monospace}
 .progress-copy strong{font:var(--weight-strong) 15px Consolas,monospace}
 @media(max-width:360px){.summary{grid-template-columns:1fr}.summary-actions{justify-content:flex-start}.titlecopy small{display:none}.settings-menu{width:210px}}
+/* Match the compact Route Planner overlay visual language. */
+.shell{grid-template-rows:38px 46px minmax(0,1fr) 25px;border-color:rgba(151,137,235,.42);border-radius:11px;background:linear-gradient(145deg,#171827,#0b0c14 72%);box-shadow:0 14px 34px rgba(0,0,0,.52)}
+.titlebar{padding:0;background:rgba(21,21,34,.86);border-bottom-color:var(--line)}
+.title-zone{height:100%}.titlecopy{gap:7px;padding:0 10px}.loadout-mark{width:15px;height:15px;flex:0 0 15px;fill:none;stroke:#a17dff;stroke-width:38}.titletext{display:block}.titlecopy strong{font-size:10px;font-weight:900;letter-spacing:.18px}.titlecopy small{display:none}.header-progress{margin-left:auto;color:#9ca4c5;font:850 9px Consolas,monospace;white-space:nowrap}
+.window-actions{height:100%;display:flex;align-items:center;gap:2px;padding:0 4px;border:0}.icon-btn{width:28px;height:28px;padding:0;border:0;border-radius:7px;background:transparent;color:#aeb5d2;display:grid;place-items:center;line-height:0;cursor:pointer;transition:background .14s,color .14s,transform .14s}.icon-btn:hover,.icon-btn[aria-expanded="true"]{background:rgba(90,167,255,.08);color:#fff}.icon-btn.active{color:#a17dff}.icon-btn svg{width:13px;height:13px}.unpin-icon{display:none}.icon-btn.active .pin-icon{display:none}.icon-btn.active .unpin-icon{display:block}
+.settings-menu{top:34px;right:5px;width:215px;padding:8px;border-color:var(--line);border-radius:9px;background:#171824}.setting-row{min-height:32px}.setting-copy small{display:none}.setting-copy strong{font-size:10px;font-weight:400}.opacity-control input{width:86px}
+.summary{grid-template-columns:minmax(0,1fr) auto;gap:10px;padding:6px 10px 6px 12px;background:rgba(11,12,20,.58);border-bottom-color:rgba(255,255,255,.07)}.progress-copy{min-width:0;display:flex;align-items:baseline;gap:8px}.progress-copy strong{font:900 12px Consolas,monospace}.progress-copy small{margin:0;color:#9da5c4;font-size:8.5px;letter-spacing:.2px}.summary-actions{gap:5px}.small-btn{height:27px;border-color:rgba(151,137,235,.24);border-radius:7px;background:rgba(16,17,26,.9);padding:0 10px;font-size:9px}.small-btn:hover,.small-btn.active{border-color:rgba(90,167,255,.55);background:rgba(90,167,255,.1)}
+.board{padding:8px 9px 10px;scrollbar-color:#45405e transparent}.group{position:relative;border-color:rgba(151,137,235,.25);border-radius:10px;background:linear-gradient(135deg,rgba(24,25,39,.96),rgba(13,14,23,.96));box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}.group:before{content:"";position:absolute;z-index:2;left:0;top:0;bottom:0;width:2px;background:linear-gradient(180deg,#48adff,#a17dff);opacity:.72}.group+.group{margin-top:8px}.group-head{padding:8px 10px 8px 12px;background:rgba(90,167,255,.035);border-bottom-color:rgba(255,255,255,.065)}.group-head small{color:#7fc4ff;font-size:7px;letter-spacing:.48px}.group-head strong{margin-top:3px;color:#f1f3ff;font-size:13px;line-height:1.05}.group-head span{margin-top:4px;color:#858dac;font-size:8px}.route{padding:6px 9px 7px 11px}.route+.route{border-top-color:rgba(255,255,255,.06)}.route-title{margin-bottom:2px}.route-title strong{font-size:9px;letter-spacing:.18px}.route-title span{font-size:8px}.cargo-row{grid-template-columns:17px 15px minmax(0,1fr) auto;gap:7px;min-height:31px;padding:4px 5px}.cargo-row:hover{background:rgba(90,167,255,.07)}.box{width:16px;height:16px;border-radius:5px}.cargo-icon{width:14px;height:14px}.cargo-name{font-size:9.5px}.scu{font-size:9.5px}.overlay-location .route-icon{width:9px;height:9px;flex-basis:9px}.overlay-location.pickup-route .route-icon{color:#48adff}.overlay-location.dropoff-route .route-icon{color:#a17dff}.empty{font-size:10px}.footer{background:rgba(11,12,20,.92);border-top-color:rgba(255,255,255,.07);font-size:8px}
+@media(max-width:410px){.icon-btn{width:32px}.summary{padding-left:9px}.progress-copy{gap:5px}.progress-copy strong{font-size:11px}.small-btn{padding:0 7px}.group-head{padding-left:10px}.route{padding-left:9px}}
+.icon-btn.danger:hover{color:#ff7181}
+.group-head{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;column-gap:12px}.compact .group-head{padding-left:16px}.group-location{min-width:0}.group-head .group-location>.overlay-location{display:block!important}.group-head .location-name{display:block;margin:0;color:#f1f3ff;font-size:15px;font-weight:900;line-height:1.05;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.group-head .group-location .location-subtitle{display:block;margin-top:3px;color:#777d97;font-size:8.5px;font-weight:650;line-height:1.05;letter-spacing:normal;text-transform:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.group-total{display:block!important;margin-top:5px!important;color:#aeb6d4!important;font-size:8.5px!important;font-weight:650!important;line-height:1;white-space:nowrap}.group-action{align-self:center;display:inline-flex!important;align-items:center;justify-content:flex-end;gap:4px;margin:0!important;font-size:8.5px!important;font-weight:900!important;letter-spacing:.25px;white-space:nowrap}.group-action.pickup-action{color:#48adff!important}.group-action.dropoff-action{color:#a17dff!important}.group-action .route-icon{display:block;width:11px;height:11px;flex:0 0 11px;fill:currentColor}.route-title{justify-content:flex-start}.route-title .overlay-location{gap:7px}.route-title .route-icon{width:11px;height:11px;flex:0 0 11px}.route-title .location-name{display:block;color:#f1f3ff;font-family:"Segoe UI Variable Text","Segoe UI",Arial,sans-serif;font-size:12px;font-weight:900;line-height:1.05;letter-spacing:normal;text-transform:none}.route-title .location-subtitle{display:block;margin-top:3px;color:#777d97;font-family:"Segoe UI Variable Text","Segoe UI",Arial,sans-serif;font-size:8.5px;font-weight:650;line-height:1.05;letter-spacing:normal;text-transform:none}
 </style>
 </head>
 <body class="size-unlocked compact">
 <div class="shell" id="shell">
   <header class="titlebar">
     <div class="title-zone">
-      <div class="titlecopy" id="dragRegion" aria-disabled="false"><span class="titletext"><strong>Hauling loadout</strong><small id="subtitle">Waiting for active cargo</small></span></div>
+      <div class="titlecopy" id="dragRegion" aria-disabled="false"><svg class="loadout-mark" viewBox="0 0 640 640" aria-hidden="true"><path d="M128 160h384v320H128zM128 256h384M320 160v320"/><path d="M250 96h140l42 64H208z"/></svg><span class="titletext"><strong>LOGISTICS BOARD</strong><small id="subtitle">Waiting for active cargo</small></span><span class="header-progress" id="headerProgress">0 / 0</span></div>
       <div class="position-lock-shield" id="positionLockShield" aria-hidden="true"></div>
     </div>
     <div class="window-actions pywebview-drag-region-exclude">
+      <button class="icon-btn" id="pinBtn" type="button" title="Lock position" aria-label="Lock position" onmousedown="event.stopPropagation()"><svg class="pin-icon" viewBox="0 0 640 640" aria-hidden="true"><path d="M160 96C160 78.3 174.3 64 192 64L448 64C465.7 64 480 78.3 480 96C480 113.7 465.7 128 448 128L418.5 128L428.8 262.1C465.9 283.3 494.6 318.5 507 361.8L510.8 375.2C513.6 384.9 511.6 395.2 505.6 403.3C499.6 411.4 490 416 480 416L160 416C150 416 140.5 411.3 134.5 403.3C128.5 395.3 126.5 384.9 129.3 375.2L133 361.8C145.4 318.5 174 283.3 211.2 262.1L221.5 128L192 128C174.3 128 160 113.7 160 96zM288 464L352 464L352 576C352 593.7 337.7 608 320 608C302.3 608 288 593.7 288 576L288 464z"/></svg><svg class="unpin-icon" viewBox="0 0 640 640" aria-hidden="true"><path d="M73 39.1C63.6 29.7 48.4 29.7 39.1 39.1C29.8 48.5 29.7 63.7 39 73.1L567 601.1C576.4 610.5 591.6 610.5 600.9 601.1C610.2 591.7 610.3 576.5 600.9 567.2L449.8 416L480 416C490 416 499.5 411.3 505.5 403.3C511.5 395.3 513.5 384.9 510.7 375.2L507 361.8C494.6 318.5 466 283.3 428.8 262.1L418.5 128L448 128C465.7 128 480 113.7 480 96C480 78.3 465.7 64 448 64L192 64C184.6 64 177.9 66.5 172.5 70.6L222.1 120.3L217.3 183.4L73 39.1zM314.2 416L181.7 283.6C159 304.1 141.9 331 133 361.9L129.2 375.3C126.4 385 128.4 395.3 134.4 403.4C140.4 411.5 150 416 160 416L314.2 416zM288 576C288 593.7 302.3 608 320 608C337.7 608 352 593.7 352 576L352 464L288 464L288 576z"/></svg></button>
       <button class="icon-btn" id="settingsBtn" type="button" title="Overlay settings" aria-expanded="false" onmousedown="event.stopPropagation()"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true"><!--!Font Awesome Free v7.3.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free Copyright 2026 Fonticons, Inc.--><path d="M259.1 73.5C262.1 58.7 275.2 48 290.4 48L350.2 48C365.4 48 378.5 58.7 381.5 73.5L396 143.5C410.1 149.5 423.3 157.2 435.3 166.3L503.1 143.8C517.5 139 533.3 145 540.9 158.2L570.8 210C578.4 223.2 575.7 239.8 564.3 249.9L511 297.3C511.9 304.7 512.3 312.3 512.3 320C512.3 327.7 511.8 335.3 511 342.7L564.4 390.2C575.8 400.3 578.4 417 570.9 430.1L541 481.9C533.4 495 517.6 501.1 503.2 496.3L435.4 473.8C423.3 482.9 410.1 490.5 396.1 496.6L381.7 566.5C378.6 581.4 365.5 592 350.4 592L290.6 592C275.4 592 262.3 581.3 259.3 566.5L244.9 496.6C230.8 490.6 217.7 482.9 205.6 473.8L137.5 496.3C123.1 501.1 107.3 495.1 99.7 481.9L69.8 430.1C62.2 416.9 64.9 400.3 76.3 390.2L129.7 342.7C128.8 335.3 128.4 327.7 128.4 320C128.4 312.3 128.9 304.7 129.7 297.3L76.3 249.8C64.9 239.7 62.3 223 69.8 209.9L99.7 158.1C107.3 144.9 123.1 138.9 137.5 143.7L205.3 166.2C217.4 157.1 230.6 149.5 244.6 143.4L259.1 73.5zM320.3 400C364.5 399.8 400.2 363.9 400 319.7C399.8 275.5 363.9 239.8 319.7 240C275.5 240.2 239.8 276.1 240 320.3C240.2 364.5 276.1 400.2 320.3 400z"/></svg></button>
       <button class="icon-btn" id="minBtn" type="button" title="Minimize" onmousedown="event.stopPropagation()"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true"><!--!Font Awesome Free v7.3.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free Copyright 2026 Fonticons, Inc.--><path d="M64 480C64 462.3 78.3 448 96 448L544 448C561.7 448 576 462.3 576 480C576 497.7 561.7 512 544 512L96 512C78.3 512 64 497.7 64 480z"/></svg></button>
       <button class="icon-btn danger" id="closeBtn" type="button" title="Close overlay" onmousedown="event.stopPropagation()"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true"><!--!Font Awesome Free v7.3.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free Copyright 2026 Fonticons, Inc.--><path d="M183.1 137.4C170.6 124.9 150.3 124.9 137.8 137.4C125.3 149.9 125.3 170.2 137.8 182.7L275.2 320L137.9 457.4C125.4 469.9 125.4 490.2 137.9 502.7C150.4 515.2 170.7 515.2 183.2 502.7L320.5 365.3L457.9 502.6C470.4 515.1 490.7 515.1 503.2 502.6C515.7 490.1 515.7 469.8 503.2 457.3L365.8 320L503.1 182.6C515.6 170.1 515.6 149.8 503.1 137.3C490.6 124.8 470.3 124.8 457.8 137.3L320.5 274.7L183.1 137.4z"/></svg></button>
     </div>
     <section class="settings-menu" id="settingsMenu" hidden onmousedown="event.stopPropagation()">
-      <div class="settings-head"><strong>Overlay settings</strong><small>Window</small></div>
       <div class="setting-row">
         <div class="setting-copy"><strong>Opacity</strong><small>Adjust the whole overlay window.</small></div>
-        <div class="opacity-control"><input id="opacityRange" type="range" min="50" max="100" step="5" value="95"><span class="opacity-value" id="opacityValue">95%</span></div>
+        <div class="opacity-control"><input id="opacityRange" type="range" min="50" max="100" step="5" value="95"></div>
       </div>
       <div class="setting-row">
         <div class="setting-copy"><strong>Lock size</strong><small>Prevent edge resizing.</small></div>
         <button class="switch" id="sizeLockSwitch" type="button" role="switch" aria-pressed="false" title="Lock overlay size"></button>
-      </div>
-      <div class="setting-row">
-        <div class="setting-copy"><strong>Lock position</strong><small>Disable dragging the header.</small></div>
-        <button class="switch" id="positionLockSwitch" type="button" role="switch" aria-pressed="false" title="Lock overlay position"></button>
       </div>
       <div class="setting-row">
         <div class="setting-copy"><strong>Always on top</strong><small>Keep the overlay above the game.</small></div>
@@ -3979,6 +4512,7 @@ OVERLAY_HTML = r'''<!doctype html>
 <div class="resize-handle" data-resize="sw" aria-hidden="true"></div>
 <script>
 const $=id=>document.getElementById(id);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function locationMarkup(info,fallback=''){const name=info?.name||fallback||'—',subtitle=info?.subtitle||'',unresolved=info?.match==='unresolved';return `<span class="location-stack${unresolved?' unresolved-location':''}"><span class="location-name">${esc(name)}</span>${subtitle?`<small class="location-subtitle">${esc(subtitle)}</small>`:''}</span>`}
 const CHECKLIST_STORAGE_KEY='sc-hauling-loading-checklist-v1',OVERLAY_VIEW_KEY='sc-hauling-overlay-view-v1';let checklist=loadChecklist(),cache=null,boardMarkup='',pointerScrollTop=0,overlaySettings={opacity:.95,size_locked:false,position_locked:false,on_top:true},overlayView=loadOverlayView();
 function loadChecklist(){try{const v=JSON.parse(localStorage.getItem(CHECKLIST_STORAGE_KEY)||'{}');return v&&typeof v==='object'?v:{}}catch(_e){return{}}}
 function saveChecklist(){try{localStorage.setItem(CHECKLIST_STORAGE_KEY,JSON.stringify(checklist))}catch(_e){}}
@@ -3988,40 +4522,45 @@ async function syncChecklist(action,id='',checked=false){try{const payload={acti
 const COLORS=Object.freeze({'hydrogen':'#8fd9f2','quartz':'#6f78c9','carbon':'#6d727c','aluminum':'#aeb7c3','aluminium':'#aeb7c3','copper':'#bd7048','iron':'#8a9099','iron (ore)':'#8a9099','titanium':'#c8ced8','tungsten':'#626975','beryl':'#69b98d','gold':'#d3ab43','diamond':'#c8edf5','agricium':'#72bd83','laranite':'#7664bd','taranite':'#bd5964','medical supplies':'#d85b69','agricultural supplies':'#77ad63','processed food':'#c99954','distilled spirits':'#9760ae','scrap':'#866654','waste':'#726451'});
 function color(name){return COLORS[String(name||'').trim().toLowerCase()]||'#8b90a5'}
 const LOCATION_SVGS=Object.freeze({
-  pickup:`<svg class="route-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true" focusable="false"><!--!Font Awesome Free v7.3.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free Copyright 2026 Fonticons, Inc.--><path d="M342.6 73.4C330.1 60.9 309.8 60.9 297.3 73.4L137.3 233.4C124.8 245.9 124.8 266.2 137.3 278.7C149.8 291.2 170.1 291.2 182.6 278.7L288 173.3L288 544C288 561.7 302.3 576 320 576C337.7 576 352 561.7 352 544L352 173.3L457.4 278.7C469.9 291.2 490.2 291.2 502.7 278.7C515.2 266.2 515.2 245.9 502.7 233.4L342.7 73.4z"/></svg>`,
-  dropoff:`<svg class="route-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true" focusable="false"><!--!Font Awesome Free v7.3.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free Copyright 2026 Fonticons, Inc.--><path d="M297.4 566.6C309.9 579.1 330.2 579.1 342.7 566.6L502.7 406.6C515.2 394.1 515.2 373.8 502.7 361.3C490.2 348.8 469.9 348.8 457.4 361.3L352 466.7L352 96C352 78.3 337.7 64 320 64C302.3 64 288 78.3 288 96L288 466.7L182.6 361.3C170.1 348.8 149.8 348.8 137.3 361.3C124.8 373.8 124.8 394.1 137.3 406.6L297.3 566.6z"/></svg>`
+  pickup:`<svg class="route-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true" focusable="false"><!--!Font Awesome Free v7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free Copyright 2026 Fonticons, Inc.--><path d="M342.6 105.4C330.1 92.9 309.8 92.9 297.3 105.4L137.3 265.4C124.8 277.9 124.8 298.2 137.3 310.7C149.8 323.2 170.1 323.2 182.6 310.7L320 173.3L457.4 310.6C469.9 323.1 490.2 323.1 502.7 310.6C515.2 298.1 515.2 277.8 502.7 265.3L342.7 105.3zM502.6 457.4L342.6 297.4C330.1 284.9 309.8 284.9 297.3 297.4L137.3 457.4C124.8 469.9 124.8 490.2 137.3 502.7C149.8 515.2 170.1 515.2 182.6 502.7L320 365.3L457.4 502.6C469.9 515.1 490.2 515.1 502.7 502.6C515.2 490.1 515.2 469.8 502.7 457.3z"/></svg>`,
+  dropoff:`<svg class="route-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true" focusable="false"><!--!Font Awesome Free v7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free Copyright 2026 Fonticons, Inc.--><path d="M342.6 534.6C330.1 547.1 309.8 547.1 297.3 534.6L137.3 374.6C124.8 362.1 124.8 341.8 137.3 329.3C149.8 316.8 170.1 316.8 182.6 329.3L320 466.7L457.4 329.4C469.9 316.9 490.2 316.9 502.7 329.4C515.2 341.9 515.2 362.2 502.7 374.7L342.7 534.7zM502.6 182.6L342.6 342.6C330.1 355.1 309.8 355.1 297.3 342.6L137.3 182.6C124.8 170.1 124.8 149.8 137.3 137.3C149.8 124.8 170.1 124.8 182.6 137.3L320 274.7L457.4 137.4C469.9 124.9 490.2 124.9 502.7 137.4C515.2 149.9 515.2 170.2 502.7 182.7z"/></svg>`
 });
 const BOX=`<svg class="cargo-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true"><!--!Font Awesome Free v7.3.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free Copyright 2026 Fonticons, Inc.--><path d="M431.1 80C451.8 80 471.2 90 483.2 106.8L532.1 175.3C539.8 186.1 544 199.2 544 212.5L544 480C544 515.3 515.3 544 480 544L160 544L153.5 543.7C121.2 540.4 96 513.1 96 480L96 212.5C96 200.8 99.2 189.4 105.2 179.5L107.9 175.3L156.8 106.8C167.3 92.1 183.5 82.6 201.2 80.5L208.9 80L431 80zM344 192L465.3 192L431 144L343.9 144L343.9 192zM174.7 192L296 192L296 144L208.9 144L174.6 192z"/></svg>`;
 function idFor(it,mode,fixed,column){return String(it.id||[mode,fixed,column,it.commodity,it.scu].join('|'))}function fmt(n){n=Number(n||0);return Number.isInteger(n)?String(n):n.toFixed(1).replace(/\.0$/,'')}
 function collect(sections){const out=[];(sections||[]).forEach(s=>(s.columns||[]).forEach(c=>(c.items||[]).forEach(it=>out.push({id:idFor(it,s.mode||'direct',s.fixed_location||'—',c.location||'—'),scu:Number(it.scu_value??it.scu??0)}))));return out}
 function stats(items){const loaded=items.filter(x=>checklist[x.id]);return{total:items.length,loaded:loaded.length,totalScu:items.reduce((n,x)=>n+x.scu,0),loadedScu:loaded.reduce((n,x)=>n+x.scu,0)}}
 function sharedStats(sections){let total=0,loaded=0;(sections||[]).forEach(section=>{if((section.mode||'')!=='aggregate_pickups')return;let loads=Array.isArray(section.shared_loads)?section.shared_loads:[];if(!loads.length){const ids=[];(section.columns||[]).forEach(col=>(col.items||[]).forEach(it=>ids.push(idFor(it,section.mode||'direct',section.fixed_location||'—',col.location||'—'))));loads=[{scu_value:Number(section.shared_scu_value??section.shared_scu??section.total??0),item_ids:ids}]}loads.forEach(load=>{const value=Number(load.scu_value??load.scu??0),ids=load.item_ids||[];if(!value)return;total+=value;if(ids.length&&ids.every(id=>checklist[id]))loaded+=value})});return{total,loaded}}
+function routeLocationKeys(value,info){const keys=[],id=String(info?.id||'').trim().toLowerCase(),name=String(info?.name||value||'').trim().toLowerCase().replace(/\s+/g,' '),qualified=String(info?.qualified_name||'').trim().toLowerCase().replace(/\s+/g,' ');if(id)keys.push(`id:${id}`);if(qualified)keys.push(`name:${qualified}`);if(name)keys.push(`name:${name}`);return keys}
+function sortSectionsByRoute(sections,route){if(!route?.valid||!(route.stops||[]).length)return sections;const order=new Map;(route.stops||[]).forEach((stop,index)=>{const info={id:stop.location_id,name:stop.location,qualified_name:stop.qualified_name};routeLocationKeys(stop.location,info).forEach(key=>{if(!order.has(key))order.set(key,index)})});const missing=route.stops.length+sections.length+1,rank=(value,info)=>routeLocationKeys(value,info).reduce((best,key)=>Math.min(best,order.has(key)?order.get(key):missing),missing);return(sections||[]).map((section,index)=>{const columns=(section.columns||[]).map((column,columnIndex)=>({column,columnIndex,rank:rank(column.location,column.location_info)})).sort((a,b)=>a.rank-b.rank||a.columnIndex-b.columnIndex).map(entry=>entry.column),sectionRanks=[rank(section.fixed_location,section.fixed_location_info),...columns.map(column=>rank(column.location,column.location_info))];return{section:{...section,columns},index,rank:Math.min(...sectionRanks)}}).sort((a,b)=>a.rank-b.rank||a.index-b.index).map(entry=>entry.section)}
 function applyOverlayView(){document.body.classList.add('compact');$('overlayHideLoadedBtn').classList.toggle('active',!!overlayView.hide_loaded);$('overlayHideLoadedBtn').textContent=overlayView.hide_loaded?'Show loaded':'Hide loaded'}
 function resetDocumentViewport(){try{window.scrollTo(0,0)}catch(_e){}document.documentElement.scrollTop=0;document.body.scrollTop=0}
 function syncChecklistRows(){document.querySelectorAll('.cargo-row[data-id]').forEach(row=>{const loaded=!!checklist[row.dataset.id];row.classList.toggle('loaded',loaded);row.setAttribute('aria-checked',loaded?'true':'false')})}
 function buildBoardMarkup(sections){
+  sections=sortSectionsByRoute(sections,cache?.route);
   if(!sections.length)return '<div class="empty">No active accepted cargo.<br>Accept or scan a hauling contract to populate this overlay.</div>';
   const markup=sections.map(section=>{
     const mode=section.mode||'direct',fixed=section.fixed_location||'—';
     const fixedKind=(mode==='single_dropoff'||mode==='aggregate_pickups')?'dropoff':'pickup';
     const columnKind=fixedKind==='pickup'?'dropoff':'pickup';
     const shared=mode==='single_pickup'||mode==='single_dropoff'||mode==='aggregate_pickups';
-    const label=`${fixedKind==='pickup'?'PICK UP LOCATION':'DROP OFF LOCATION'}${shared?' (SHARED)':''}`;
+    const actionLabel=`${fixedKind==='pickup'?'PICK UP':'DROP OFF'}${shared?' (SHARED)':''}`;
+    const sectionEntries=[];(section.columns||[]).forEach(col=>(col.items||[]).forEach(it=>sectionEntries.push({id:idFor(it,mode,fixed,col.location||'â€”'),scu:Number(it.scu_value??it.scu??0)})));
+    const sectionProgress=stats(sectionEntries),loadedSectionScu=mode==='aggregate_pickups'?sharedStats([section]).loaded:sectionProgress.loadedScu;
     const routes=(section.columns||[]).map(col=>{
       const all=(col.items||[]).map(it=>({it,id:idFor(it,mode,fixed,col.location||'—'),scu:Number(it.scu_value??it.scu??0)}));
       const routeStats=stats(all);
       const visible=overlayView.hide_loaded?all.filter(entry=>!checklist[entry.id]):all;
       const rows=visible.map(entry=>{const amount=String(entry.it.scu||'').trim();return `<div class="cargo-row" data-id="${esc(entry.id)}" role="checkbox" aria-checked="false"><span class="box" aria-hidden="true"></span><span style="color:${color(entry.it.commodity)}">${BOX}</span><span class="cargo-name">${esc(entry.it.commodity)}</span><span class="scu">${amount?`${esc(amount)} SCU`:''}</span></div>`}).join('');
-      const progress=mode==='aggregate_pickups'?`${routeStats.loaded}/${routeStats.total} loaded`:`${routeStats.loaded}/${routeStats.total} · ${fmt(routeStats.loadedScu)}/${fmt(routeStats.totalScu)} SCU`;
-      return `<section class="route${overlayView.hide_loaded&&routeStats.total>0&&routeStats.loaded===routeStats.total?' empty-route':''}"><div class="route-title"><strong class="overlay-location ${columnKind}-route" title="${esc(col.location)}">${LOCATION_SVGS[columnKind]}<span class="location-text">${esc(col.location)}</span></strong><span>${esc(progress)}</span></div>${rows||'<div class="empty">Loaded</div>'}</section>`;
+      return `<section class="route${overlayView.hide_loaded&&routeStats.total>0&&routeStats.loaded===routeStats.total?' empty-route':''}"><div class="route-title"><strong class="overlay-location ${columnKind}-route" title="${esc(col.location_info?.subtitle||col.location)}">${LOCATION_SVGS[columnKind]}<span class="location-text">${locationMarkup(col.location_info,col.location)}</span></strong></div>${rows||'<div class="empty">Loaded</div>'}</section>`;
     }).join('');
-    const totalLabel=mode==='aggregate_pickups'?`${section.total} SCU shared total`:`${section.total} SCU total`;
-    return `<article class="group"><div class="group-head"><small>${esc(label)}</small><strong class="overlay-location ${fixedKind}-route" title="${esc(fixed)}">${LOCATION_SVGS[fixedKind]}<span class="location-text">${esc(fixed)}</span></strong><span>${esc(totalLabel)}</span></div>${routes}</article>`;
+    const totalLabel=`${fmt(loadedSectionScu)} / ${fmt(Number(section.total||sectionProgress.totalScu))} SCU`;
+    return `<article class="group"><div class="group-head"><div class="group-location"><strong class="overlay-location ${fixedKind}-route" title="${esc(section.fixed_location_info?.subtitle||fixed)}"><span class="location-text">${locationMarkup(section.fixed_location_info,fixed)}</span></strong><span class="group-total">${esc(totalLabel)}</span></div><span class="group-action ${fixedKind}-action">${esc(actionLabel)}${LOCATION_SVGS[fixedKind]}</span></div>${routes}</article>`;
   }).join('');
   return markup||'<div class="empty">All loaded cargo is hidden.</div>';
 }
-function render(data){cache=data;if(data?.checklist&&typeof data.checklist==='object'){checklist={...data.checklist};saveChecklist()}const sections=data?.logistics?.sections||[],items=collect(sections),valid=new Set(items.map(x=>x.id));let dirty=false;Object.keys(checklist).forEach(id=>{if(!valid.has(id)){delete checklist[id];dirty=true}});if(dirty)saveChecklist();const st=stats(items),shared=sharedStats(sections),complete=st.total>0&&st.loaded===st.total;applyOverlayView();$('progress').textContent=`${st.loaded} / ${st.total} loaded`;$('scuProgress').textContent=`${fmt(st.loadedScu+shared.loaded)} / ${fmt(st.totalScu+shared.total)} SCU`;$('summary').classList.toggle('complete',complete);$('subtitle').textContent=sections.length?`${sections.length} route ${sections.length===1?'group':'groups'} · ${items.length} cargo items`:'No active accepted cargo';$('clearBtn').disabled=st.loaded===0;$('liveState').innerHTML=data.watching?'<span class="live">● LIVE</span>':'IDLE';const board=$('board'),scrollTop=board.scrollTop,markup=buildBoardMarkup(sections);if(markup!==boardMarkup){boardMarkup=markup;board.innerHTML=markup;board.scrollTop=scrollTop}syncChecklistRows();resetDocumentViewport()}
-async function refresh(){try{const r=await fetch('/api/state',{cache:'no-store'});if(!r.ok)throw new Error(r.status);render(await r.json())}catch(e){$('liveState').textContent='OFFLINE'}}
+function render(data){cache=data;if(data?.checklist&&typeof data.checklist==='object'){checklist={...data.checklist};saveChecklist()}const sections=data?.logistics?.sections||[],items=collect(sections),valid=new Set(items.map(x=>x.id));let dirty=false;Object.keys(checklist).forEach(id=>{if(!valid.has(id)){delete checklist[id];dirty=true}});if(dirty)saveChecklist();const st=stats(items),shared=sharedStats(sections),complete=st.total>0&&st.loaded===st.total;applyOverlayView();$('progress').textContent=`${st.loaded} / ${st.total} loaded`;$('headerProgress').textContent=`${st.loaded} / ${st.total}`;$('scuProgress').textContent=`${fmt(st.loadedScu+shared.loaded)} / ${fmt(st.totalScu+shared.total)} SCU`;$('summary').classList.toggle('complete',complete);$('subtitle').textContent=sections.length?`${sections.length} route ${sections.length===1?'group':'groups'} · ${items.length} cargo items`:'No active accepted cargo';$('clearBtn').disabled=st.loaded===0;$('liveState').innerHTML=data.watching?'<span class="live">● LIVE</span>':'IDLE';const board=$('board'),scrollTop=board.scrollTop,markup=buildBoardMarkup(sections);if(markup!==boardMarkup){boardMarkup=markup;board.innerHTML=markup;board.scrollTop=scrollTop}syncChecklistRows();resetDocumentViewport()}
+function renderRouteNext(data){const route=data?.route,next=route?.valid&&!route?.outdated?(route.stops||[]).find(stop=>stop.completion_state!=='completed'&&stop.completion_state!=='skipped'):null;if(!next)return;const pickup=(next.pickups||[]).reduce((n,op)=>n+Number(op.scu_value||0),0),delivery=(next.deliveries||[]).reduce((n,op)=>n+Number(op.scu_value||0),0),kind=delivery?`Deliver ${fmt(delivery)} SCU`:pickup?`Pick up ${fmt(pickup)} SCU`:'Operational stop';$('subtitle').textContent=`NEXT: ${next.location} · ${kind} · Stop ${next.number} of ${route.stops.length}`}
+async function refresh(){try{const r=await fetch('/api/state',{cache:'no-store'});if(!r.ok)throw new Error(r.status);const data=await r.json();render(data);renderRouteNext(data)}catch(e){$('liveState').textContent='OFFLINE'}}
 $('board').addEventListener('pointerdown',e=>{if(e.target.closest('.cargo-row[data-id]'))pointerScrollTop=$('board').scrollTop});
 $('board').addEventListener('click',e=>{const row=e.target.closest('.cargo-row[data-id]');if(!row)return;e.preventDefault();e.stopPropagation();const scrollTop=pointerScrollTop||$('board').scrollTop,id=row.dataset.id;if(checklist[id])delete checklist[id];else checklist[id]=true;saveChecklist();syncChecklist('set',id,!!checklist[id]);if(cache){cache.checklist={...checklist};render(cache)};const restore=()=>{$('board').scrollTop=scrollTop;resetDocumentViewport()};requestAnimationFrame(restore);setTimeout(restore,0);setTimeout(restore,80)});
 $('clearBtn').addEventListener('click',()=>{const scrollTop=$('board').scrollTop;checklist={};saveChecklist();syncChecklist('clear');if(cache){cache.checklist={};render(cache)};requestAnimationFrame(()=>{$('board').scrollTop=scrollTop;resetDocumentViewport()})});
@@ -4036,13 +4575,13 @@ function withTimeout(promise,ms){return Promise.race([promise,new Promise((_,rej
 async function nativeHttp(name,args){if(!CONTROL_PORT||!CONTROL_TOKEN)throw new Error('Overlay control channel unavailable');const response=await fetch(`http://127.0.0.1:${CONTROL_PORT}/command`,{method:'POST',mode:'cors',cache:'no-store',headers:{'Content-Type':'application/json','X-SC-Overlay-Token':CONTROL_TOKEN},body:JSON.stringify({name,args})});let payload=null;try{payload=await response.json()}catch(_e){}if(!response.ok||!payload?.ok)throw new Error(payload?.error||`Overlay control failed (${response.status})`);return payload.result}
 async function native(name,...args){let httpError=null;if(CONTROL_PORT&&CONTROL_TOKEN){try{return await nativeHttp(name,args)}catch(error){httpError=error}}let bridgeError=null;try{const fn=window.pywebview?.api?.[name];if(typeof fn==='function'){const result=await withTimeout(fn(...args),900);if(result!==undefined&&result!==null)return result}}catch(error){bridgeError=error}const detail=httpError?.message||bridgeError?.message||'Native control unavailable';console.error(`Overlay command ${name} failed`,httpError,bridgeError);controlMessage(detail,true);return null}
 function setSwitch(id,value){$(id).setAttribute('aria-pressed',value?'true':'false')}
-window.applyNativeSettings=function(status){if(!status)return;overlaySettings={...overlaySettings,...status};const opacity=Math.max(.5,Math.min(1,Number(overlaySettings.opacity||.95)));$('opacityRange').value=String(Math.round(opacity*100));$('opacityValue').textContent=`${Math.round(opacity*100)}%`;setSwitch('sizeLockSwitch',!!overlaySettings.size_locked);setSwitch('positionLockSwitch',!!overlaySettings.position_locked);setSwitch('onTopSwitch',overlaySettings.on_top!==false);document.body.classList.toggle('size-unlocked',!overlaySettings.size_locked);document.body.classList.toggle('position-locked',!!overlaySettings.position_locked);$('dragRegion').setAttribute('aria-disabled',overlaySettings.position_locked?'true':'false');$('positionLockShield').setAttribute('aria-hidden',overlaySettings.position_locked?'false':'true')};
+ window.applyNativeSettings=function(status){if(!status)return;overlaySettings={...overlaySettings,...status};const opacity=Math.max(.5,Math.min(1,Number(overlaySettings.opacity||.95)));$('opacityRange').value=String(Math.round(opacity*100));setSwitch('sizeLockSwitch',!!overlaySettings.size_locked);setSwitch('onTopSwitch',overlaySettings.on_top!==false);document.body.classList.toggle('size-unlocked',!overlaySettings.size_locked);document.body.classList.toggle('position-locked',!!overlaySettings.position_locked);$('dragRegion').setAttribute('aria-disabled',overlaySettings.position_locked?'true':'false');$('positionLockShield').setAttribute('aria-hidden',overlaySettings.position_locked?'false':'true');$('pinBtn').classList.toggle('active',!!overlaySettings.position_locked);const pinLabel=overlaySettings.position_locked?'Unlock position':'Lock position';$('pinBtn').title=pinLabel;$('pinBtn').setAttribute('aria-label',pinLabel)};
 function toggleSettings(force){const menu=$('settingsMenu'),open=typeof force==='boolean'?force:menu.hidden;menu.hidden=!open;$('settingsBtn').setAttribute('aria-expanded',open?'true':'false');if(open)native('get_overlay_status').then(window.applyNativeSettings)}
 $('settingsBtn').addEventListener('click',e=>{e.stopPropagation();toggleSettings()});
 document.addEventListener('pointerdown',e=>{if(!$('settingsMenu').hidden&&!e.target.closest('#settingsMenu')&&!e.target.closest('#settingsBtn'))toggleSettings(false)});document.addEventListener('keydown',e=>{if(e.key==='Escape')toggleSettings(false)});
-let opacityTimer=null;$('opacityRange').addEventListener('input',e=>{const pct=Number(e.target.value);$('opacityValue').textContent=`${pct}%`;clearTimeout(opacityTimer);opacityTimer=setTimeout(async()=>window.applyNativeSettings(await native('set_overlay_opacity',pct/100)),45)});
+ let opacityTimer=null;$('opacityRange').addEventListener('input',e=>{const pct=Number(e.target.value);clearTimeout(opacityTimer);opacityTimer=setTimeout(async()=>window.applyNativeSettings(await native('set_overlay_opacity',pct/100)),45)});
 $('sizeLockSwitch').addEventListener('click',async()=>window.applyNativeSettings(await native('set_overlay_size_locked',!overlaySettings.size_locked)));
-$('positionLockSwitch').addEventListener('click',async()=>window.applyNativeSettings(await native('set_overlay_position_locked',!overlaySettings.position_locked)));
+$('pinBtn').addEventListener('click',async()=>window.applyNativeSettings(await native('set_overlay_position_locked',!overlaySettings.position_locked)));
 $('onTopSwitch').addEventListener('click',async()=>window.applyNativeSettings(await native('set_overlay_on_top',overlaySettings.on_top===false)));
 $('closeBtn').addEventListener('click',async e=>{e.preventDefault();e.stopPropagation();const result=await native('hide_overlay');if(result===null)controlMessage('Close command failed',true)});$('minBtn').addEventListener('click',async e=>{e.preventDefault();e.stopPropagation();const result=await native('minimize_overlay');if(result===null)controlMessage('Minimize command failed',true)});
 ['pointerdown','mousedown','dblclick'].forEach(type=>$('positionLockShield').addEventListener(type,event=>{event.preventDefault();event.stopImmediatePropagation()}));
@@ -4051,6 +4590,164 @@ document.querySelectorAll('.resize-handle[data-resize]').forEach(handle=>{handle
 async function loadNativeSettings(){const status=await native('get_overlay_status');if(status)window.applyNativeSettings(status)}
 window.addEventListener('pywebviewready',loadNativeSettings);setTimeout(loadNativeSettings,120);setTimeout(loadNativeSettings,900);
 refresh();setInterval(refresh,900);
+</script>
+</body>
+</html>'''
+
+
+def route_overlay_debug_scenarios() -> dict:
+    """Return deterministic compact-overlay states for visual and regression testing."""
+
+    def cargo(name: str, scu: int, suffix: str, *, pickup: bool = True) -> dict:
+        item = {
+            "commodity": name,
+            "scu_value": scu,
+            "contract_id": f"debug-contract-{suffix}",
+            "member_identity": f"debug-member-{suffix}",
+        }
+        if pickup:
+            item["checklist_ids"] = [f"debug-check-{suffix}"]
+        return item
+
+    def active_state(current: dict, *, before: int = 2, after: bool = True, checklist: Optional[dict] = None) -> dict:
+        stops = [
+            {
+                "stop_id": f"debug-history-{index}", "number": index,
+                "location": f"Completed stop {index}", "historical": True,
+                "pickups": [], "deliveries": [], "distance_from_previous": 12000,
+            }
+            for index in range(1, before + 1)
+        ]
+        current = dict(current)
+        current.setdefault("stop_id", "debug-current")
+        current.setdefault("number", before + 1)
+        current.setdefault("pickups", [])
+        current.setdefault("deliveries", [])
+        current.setdefault("distance_from_previous", 61000)
+        current.setdefault("parent_body", "Stanton system")
+        stops.append(current)
+        if after:
+            stops.append({
+                "stop_id": "debug-next", "number": before + 2,
+                "location": "Dudley & Daughters", "pickups": [], "deliveries": [],
+                "user_waypoint": True, "distance_from_previous": 79000,
+            })
+        return {
+            "route": {"valid": True, "outdated": False, "input_hash": f"debug-{current['stop_id']}", "stops": stops},
+            "checklist": dict(checklist or {}), "loaded_member_identities": [], "groups": [],
+        }
+
+    short_pickups = [cargo("Potassium", 6, "potassium"), cargo("Hydrogen", 9, "hydrogen")]
+    short_deliveries = [cargo("Aluminum", 5, "aluminum", pickup=False), cargo("Waste", 7, "waste", pickup=False)]
+    long_pickups = short_pickups + [cargo("Copper", 7, "copper"), cargo("Quartz", 4, "quartz"), cargo("Silicon", 12, "silicon")]
+    long_deliveries = short_deliveries + [cargo("Iron", 8, "iron", pickup=False), cargo("Titanium", 10, "titanium", pickup=False)]
+    loaded_checklist = {item["checklist_ids"][0]: True for item in short_pickups}
+    advanced_state = {
+        "route": {"valid": True, "outdated": False, "input_hash": "debug-advanced", "stops": [
+            {"stop_id": "loaded-pickup", "number": 1, "location": "Ashland", "pickups": short_pickups, "deliveries": [], "distance_from_previous": 0},
+            {"stop_id": "advanced", "number": 2, "location": "Canard View", "pickups": [], "deliveries": short_deliveries, "distance_from_previous": 52000},
+        ]},
+        "checklist": loaded_checklist, "loaded_member_identities": [], "groups": [],
+    }
+
+    scenarios = {
+        "no-route": ("No calculated route", {"route": {"valid": False}, "checklist": {}, "groups": []}),
+        "outdated": ("Outdated route", {"route": {"valid": True, "outdated": True, "stops": []}, "checklist": {}, "groups": []}),
+        "pickup": ("Pickup", active_state({"stop_id": "pickup", "location": "Ashland", "pickups": short_pickups})),
+        "pickup-overflow": ("Pickup · overflowing cargo", active_state({"stop_id": "pickup-overflow", "location": "Ashland", "pickups": long_pickups})),
+        "dropoff": ("Drop-off", active_state({"stop_id": "dropoff", "location": "Endgame", "deliveries": short_deliveries})),
+        "dropoff-overflow": ("Drop-off · overflowing cargo", active_state({"stop_id": "dropoff-overflow", "location": "Endgame", "deliveries": long_deliveries})),
+        "mixed": ("Mixed pickup and drop-off", active_state({"stop_id": "mixed", "location": "Gaslight", "pickups": short_pickups, "deliveries": short_deliveries})),
+        "mixed-overflow": ("Mixed · both lanes overflowing", active_state({"stop_id": "mixed-overflow", "location": "Gaslight", "pickups": long_pickups, "deliveries": long_deliveries})),
+        "waypoint": ("Intermediate user waypoint", active_state({"stop_id": "waypoint", "location": "Pyro I", "user_waypoint": True})),
+        "warning": ("Warning state", active_state({"stop_id": "warning", "location": "Fallow Field", "pickups": short_pickups, "warnings": ["2 phantom pickups ignored"]})),
+        "advanced": ("Loaded pickup advances to next stop", advanced_state),
+        "final-stop": ("Final active stop", active_state({"stop_id": "final", "location": "Endgame", "deliveries": short_deliveries}, before=2, after=False)),
+        "complete": ("Route complete", {"route": {"valid": True, "outdated": False, "input_hash": "debug-complete", "stops": [{"stop_id": "done", "number": 1, "location": "Endgame", "historical": True, "pickups": [], "deliveries": []}]}, "checklist": {}, "groups": []}),
+    }
+    return {key: {"title": title, "state": state} for key, (title, state) in scenarios.items()}
+
+
+ROUTE_OVERLAY_DEBUG_HTML = r'''<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SCHT Route Overlay Debug Scenarios</title><style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;padding:24px;background:#080910;color:#eef1ff;font-family:"Segoe UI",sans-serif}header{display:flex;align-items:end;justify-content:space-between;gap:20px;margin:0 auto 20px;max-width:1100px}h1{margin:0;font-size:22px}p{margin:5px 0 0;color:#929ab9;font-size:12px}.count{color:#a17dff;font:800 12px Consolas,monospace}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(516px,1fr));gap:18px;max-width:1100px;margin:auto}.case{padding:7px;border:1px solid #292b43;border-radius:13px;background:#11121d;box-shadow:0 12px 30px #0006}.case h2{margin:1px 5px 7px;font-size:11px;color:#b9c0dc;letter-spacing:.25px}.case iframe{display:block;width:500px;height:160px;max-width:100%;border:0;border-radius:11px;background:#0b0c14}
+</style></head><body><header><div><h1>Compact Route Overlay scenarios</h1><p>Deterministic visual fixtures at the production 500 × 160 pixel size.</p></div><span class="count" id="count">Loading…</span></header><main class="grid" id="grid"></main><script>
+fetch('/api/debug/route-overlay-scenarios').then(response=>response.json()).then(payload=>{const scenarios=payload.scenarios||[];document.getElementById('count').textContent=`${scenarios.length} scenarios`;document.getElementById('grid').innerHTML=scenarios.map(item=>`<article class="case"><h2>${item.title}</h2><iframe title="${item.title}" src="/route-overlay?debug_scenario=${encodeURIComponent(item.id)}"></iframe></article>`).join('')}).catch(error=>{document.getElementById('count').textContent='Could not load scenarios';document.getElementById('grid').textContent=String(error)})
+</script></body></html>'''
+
+
+ROUTE_OVERLAY_HTML = r'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SCHT Route Planner</title>
+<style>
+:root{--blue:#48adff;--purple:#a17dff;--green:#72e79a;--amber:#f0b554;--text:#eef1ff;--soft:#b8bfdc;--muted:#7f87a7;--line:rgba(151,137,235,.27)}
+*{box-sizing:border-box}html,body{position:fixed;inset:0;width:100%;height:100%;margin:0;overflow:hidden;background:#0b0c14;color:var(--text);font-family:"Segoe UI Variable Text","Segoe UI",Arial,sans-serif}button,input{font:inherit}.shell{position:absolute;inset:0;display:grid;grid-template-rows:38px minmax(66px,1fr) 34px;border:1px solid rgba(151,137,235,.42);border-radius:11px;overflow:hidden;background:linear-gradient(145deg,#171827,#0b0c14 72%);box-shadow:0 14px 34px rgba(0,0,0,.52)}
+.titlebar{position:relative;z-index:10;display:flex;align-items:center;border-bottom:1px solid var(--line);background:rgba(21,21,34,.86)}.drag-region{height:100%;min-width:0;flex:1;display:flex;align-items:center;gap:7px;padding:0 10px;cursor:move;user-select:none}.position-locked .drag-region{cursor:default}.route-mark{width:15px;height:15px;fill:none;stroke:var(--purple);stroke-width:42}.title{font-size:10px;font-weight:900;letter-spacing:.18px}.progress{margin-left:auto;color:#9ca4c5;font:850 9px Consolas,monospace}.actions{height:100%;display:flex;align-items:center;gap:2px;padding:0 4px;border:0}.action{width:28px;height:28px;padding:0;border:0;border-radius:7px;background:transparent;color:#aeb5d2;display:grid;place-items:center;line-height:0;cursor:pointer;transition:background .14s,color .14s,transform .14s}.action:hover,.action[aria-expanded="true"]{background:rgba(90,167,255,.08);color:#fff}.action.active{color:var(--purple)}.action.danger:hover{color:#ff7181}.action svg{width:13px;height:13px;fill:currentColor;pointer-events:none}.unpin-icon{display:none}.action.active .pin-icon{display:none}.action.active .unpin-icon{display:block}
+.stop{display:grid;grid-template-columns:40px minmax(0,1fr) auto;column-gap:9px;align-items:center;padding:6px 12px;min-width:0}.stop-number{width:32px;height:32px;border:1px solid var(--blue);border-radius:50%;display:grid;place-items:center;color:#75c5ff;background:rgba(40,131,208,.09);font:900 12px Consolas,monospace;box-shadow:0 0 11px rgba(54,155,235,.12)}.stop.dropoff .stop-number{border-color:var(--purple);color:#b497ff;background:rgba(133,92,226,.09)}.stop.mixed .stop-number{border-color:#8c89ff;color:#a9a8ff;background:linear-gradient(145deg,rgba(40,131,208,.11),rgba(133,92,226,.12))}.stop.waypoint .stop-number{border-color:var(--amber);color:var(--amber);background:rgba(240,181,84,.08)}.stop.completed .stop-number{border-color:var(--green);color:var(--green);background:rgba(72,190,113,.09)}.stop.warning .stop-number{border-color:var(--amber);color:var(--amber)}.stop-copy{min-width:0}.stop-name{margin:0;color:#f1f3ff;font-size:15px;font-weight:900;line-height:1.05;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.stop-detail{min-width:0;margin-top:4px}.cargo-line{min-width:0;height:15px}.cargo-group{display:inline-flex;align-items:center;gap:6px}.cargo-group+.cargo-group{margin-left:12px}.cargo-group-icon{display:grid;place-items:center;flex:0 0 11px}.cargo-group-icon svg{width:11px;height:11px;fill:currentColor}.load-group .cargo-group-icon{color:var(--blue)}.unload-group .cargo-group-icon{color:var(--purple)}.cargo-viewport{min-width:0;overflow:hidden;white-space:nowrap;mask-image:linear-gradient(90deg,transparent 0,#000 7px,#000 calc(100% - 9px),transparent 100%)}.cargo-track{display:flex;width:max-content;align-items:center;will-change:transform}.cargo-run{display:inline-flex;align-items:center;gap:0;padding-right:22px;color:#aeb6d4;font-size:8.5px;font-weight:650;white-space:nowrap}.cargo-viewport:not(.is-overflowing) .cargo-run-copy{display:none}.cargo-viewport.is-overflowing .cargo-track{animation:cargoTicker var(--ticker-duration,12s) linear infinite}.cargo-viewport.is-overflowing:hover .cargo-track{animation-play-state:paused}.cargo{display:inline-flex;align-items:center;gap:4px}.cargo i{width:7px;height:7px;flex:0 0 7px;border-radius:2px;background:var(--cargo-color);box-shadow:0 0 6px color-mix(in srgb,var(--cargo-color) 55%,transparent)}.cargo-sep{color:#555d7c}@keyframes cargoTicker{to{transform:translateX(-50%)}}@media(prefers-reduced-motion:reduce){.cargo-viewport.is-overflowing .cargo-track{animation:none}.cargo-viewport .cargo-run-copy{display:none!important}}.action-label{align-self:center;display:grid;justify-items:end;gap:3px;color:var(--blue);font-size:8.5px;font-weight:900;letter-spacing:.25px;white-space:nowrap}.dropoff .action-label{color:var(--purple)}.action-item{display:flex;align-items:center;justify-content:flex-end;gap:4px}.action-item .cargo-action-chevron{width:11px;height:11px;fill:currentColor}.pickup-action{color:var(--blue)}.dropoff-action{color:var(--purple)}.completed .action-label{color:var(--green)}.warning .action-label{color:var(--amber)}.action-label b{font-size:13px;line-height:1}.stop-command{min-width:84px;height:24px;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:0 10px;border:1px solid rgba(90,167,255,.38);border-radius:6px;background:rgba(90,167,255,.08);color:#91ceff;font-size:7.5px;font-weight:900;line-height:1;letter-spacing:.2px;text-align:center;cursor:pointer;white-space:nowrap}.stop-command svg{width:8px;height:8px;flex:0 0 8px;fill:currentColor;pointer-events:none}.stop-command:hover{border-color:rgba(90,167,255,.7);background:rgba(90,167,255,.15);color:#fff}.stop-command:disabled{opacity:.48;cursor:default}.load-command{min-width:101px;flex:0 0 auto}.waypoint .stop-command{min-width:82px;border-color:rgba(240,181,84,.45);background:rgba(240,181,84,.08);color:#ffd285}.empty{grid-column:1/-1;display:grid;place-items:center;padding:0 18px;color:var(--muted);font-size:10.5px;font-weight:750;line-height:1.35;text-align:center}
+.cargo-empty{color:#aeb6d4;font-size:8.5px;font-weight:650}.next{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px;padding:0 12px;border-top:1px solid rgba(255,255,255,.07);background:rgba(11,12,20,.86);font-size:9px}.next-main{min-width:0;display:flex;align-items:baseline;gap:6px;white-space:nowrap;overflow:hidden}.next-main b{color:var(--purple);font-size:8px;letter-spacing:.5px}.next-main strong{min-width:0;overflow:hidden;text-overflow:ellipsis;color:#e5e8f8;font-size:10px}.next-main span,.next-meta{color:#a4accb}.next-meta{white-space:nowrap;font:800 9.5px Consolas,monospace;letter-spacing:.05px}.settings{position:absolute;z-index:30;right:5px;top:34px;width:215px;padding:8px;border:1px solid var(--line);border-radius:9px;background:#171824;box-shadow:0 18px 42px rgba(0,0,0,.65)}.settings[hidden]{display:none}.setting{display:grid;grid-template-columns:1fr auto;align-items:center;gap:9px;min-height:30px;border-top:1px solid rgba(255,255,255,.055);font-size:10px;font-weight:400}.settings .setting:first-child{border-top:0}.setting input[type="range"]{width:86px;accent-color:var(--purple)}.switch{width:31px;height:18px;padding:0;border:1px solid #4b4e64;border-radius:20px;background:#10111a;position:relative}.switch:after{content:"";position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#858ba3;transition:.14s}.switch[aria-pressed="true"]{border-color:rgba(113,231,154,.5);background:rgba(113,231,154,.12)}.switch[aria-pressed="true"]:after{left:15px;background:var(--green)}
+.stop-actions{align-self:center;display:flex;align-items:center;justify-content:flex-end;gap:9px;white-space:nowrap}.stop-actions .action-label{align-self:auto}.stop-command{font-size:9px}
+.stop-copy{align-self:center}.stop-location-meta{display:block;min-width:0;margin-top:3px;color:#777d97;font-size:8.5px;font-weight:650;line-height:1.05;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:470px){.stop{grid-template-columns:38px minmax(0,1fr) auto;padding-left:9px;padding-right:9px;column-gap:7px}.stop-name{font-size:14px}.next{padding:0 9px}.next-meta .remaining{display:none}.action{width:32px}.stop-actions{gap:6px}}
+</style>
+</head>
+<body>
+<main class="shell">
+  <header class="titlebar">
+    <div class="drag-region" id="dragRegion"><svg class="route-mark" viewBox="0 0 640 640" aria-hidden="true"><circle cx="320" cy="320" r="170"/><circle cx="320" cy="320" r="38"/><path d="M115 320H55M585 320h-60M320 115V55M320 585v-60M224 416l192-192"/></svg><span class="title">ROUTE PLANNER</span><span class="progress" id="progress">— / —</span></div>
+    <div class="actions">
+      <button class="action" id="pinBtn" type="button" title="Lock position" aria-label="Lock position"><svg class="pin-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true"><path d="M160 96C160 78.3 174.3 64 192 64L448 64C465.7 64 480 78.3 480 96C480 113.7 465.7 128 448 128L418.5 128L428.8 262.1C465.9 283.3 494.6 318.5 507 361.8L510.8 375.2C513.6 384.9 511.6 395.2 505.6 403.3C499.6 411.4 490 416 480 416L160 416C150 416 140.5 411.3 134.5 403.3C128.5 395.3 126.5 384.9 129.3 375.2L133 361.8C145.4 318.5 174 283.3 211.2 262.1L221.5 128L192 128C174.3 128 160 113.7 160 96zM288 464L352 464L352 576C352 593.7 337.7 608 320 608C302.3 608 288 593.7 288 576L288 464z"/></svg><svg class="unpin-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true"><path d="M73 39.1C63.6 29.7 48.4 29.7 39.1 39.1C29.8 48.5 29.7 63.7 39 73.1L567 601.1C576.4 610.5 591.6 610.5 600.9 601.1C610.2 591.7 610.3 576.5 600.9 567.2L449.8 416L480 416C490 416 499.5 411.3 505.5 403.3C511.5 395.3 513.5 384.9 510.7 375.2L507 361.8C494.6 318.5 466 283.3 428.8 262.1L418.5 128L448 128C465.7 128 480 113.7 480 96C480 78.3 465.7 64 448 64L192 64C184.6 64 177.9 66.5 172.5 70.6L222.1 120.3L217.3 183.4L73 39.1zM314.2 416L181.7 283.6C159 304.1 141.9 331 133 361.9L129.2 375.3C126.4 385 128.4 395.3 134.4 403.4C140.4 411.5 150 416 160 416L314.2 416zM288 576C288 593.7 302.3 608 320 608C337.7 608 352 593.7 352 576L352 464L288 464L288 576z"/></svg></button>
+      <button class="action" id="settingsBtn" type="button" title="Settings" aria-label="Route overlay settings" aria-expanded="false"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true"><path d="M259.1 73.5C262.1 58.7 275.2 48 290.4 48L350.2 48C365.4 48 378.5 58.7 381.5 73.5L396 143.5C410.1 149.5 423.3 157.2 435.3 166.3L503.1 143.8C517.5 139 533.3 145 540.9 158.2L570.8 210C578.4 223.2 575.7 239.8 564.3 249.9L511 297.3C511.9 304.7 512.3 312.3 512.3 320C512.3 327.7 511.8 335.3 511 342.7L564.4 390.2C575.8 400.3 578.4 417 570.9 430.1L541 481.9C533.4 495 517.6 501.1 503.2 496.3L435.4 473.8C423.3 482.9 410.1 490.5 396.1 496.6L381.7 566.5C378.6 581.4 365.5 592 350.4 592L290.6 592C275.4 592 262.3 581.3 259.3 566.5L244.9 496.6C230.8 490.6 217.7 482.9 205.6 473.8L137.5 496.3C123.1 501.1 107.3 495.1 99.7 481.9L69.8 430.1C62.2 416.9 64.9 400.3 76.3 390.2L129.7 342.7C128.8 335.3 128.4 327.7 128.4 320C128.4 312.3 128.9 304.7 129.7 297.3L76.3 249.8C64.9 239.7 62.3 223 69.8 209.9L99.7 158.1C107.3 144.9 123.1 138.9 137.5 143.7L205.3 166.2C217.4 157.1 230.6 149.5 244.6 143.4L259.1 73.5zM320.3 400C364.5 399.8 400.2 363.9 400 319.7C399.8 275.5 363.9 239.8 319.7 240C275.5 240.2 239.8 276.1 240 320.3C240.2 364.5 276.1 400.2 320.3 400z"/></svg></button>
+      <button class="action" id="minBtn" type="button" title="Minimize" aria-label="Minimize"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true"><path d="M64 480C64 462.3 78.3 448 96 448L544 448C561.7 448 576 462.3 576 480C576 497.7 561.7 512 544 512L96 512C78.3 512 64 497.7 64 480z"/></svg></button>
+      <button class="action danger" id="closeBtn" type="button" title="Close" aria-label="Close route overlay"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true"><path d="M183.1 137.4C170.6 124.9 150.3 124.9 137.8 137.4C125.3 149.9 125.3 170.2 137.8 182.7L275.2 320L137.9 457.4C125.4 469.9 125.4 490.2 137.9 502.7C150.4 515.2 170.7 515.2 183.2 502.7L320.5 365.3L457.9 502.6C470.4 515.1 490.7 515.1 503.2 502.6C515.7 490.1 515.7 469.8 503.2 457.3L365.8 320L503.1 182.6C515.6 170.1 515.6 149.8 503.1 137.3C490.6 124.8 470.3 124.8 457.8 137.3L320.5 274.7L183.1 137.4z"/></svg></button>
+    </div>
+    <section class="settings" id="settingsMenu" hidden><label class="setting"><span>Opacity</span><input id="opacityRange" type="range" min="50" max="100" step="5" value="95"></label><div class="setting"><span>Always on top</span><button class="switch" id="onTopSwitch" type="button" aria-pressed="true"></button></div></section>
+  </header>
+  <section class="stop" id="stop"><div class="empty">Calculate a route in SCHT to populate this overlay.</div></section>
+  <footer class="next"><span class="next-main"><b>NEXT:</b><strong id="nextName">—</strong><span id="nextDistance"></span></span><span class="next-meta"><span class="remaining" id="remaining"></span></span></footer>
+</main>
+<script>
+const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));let nativeSettings={opacity:.95,position_locked:false,on_top:true},cache=null,lastStopMarkup='';const params=new URLSearchParams(location.search),debugScenario=params.get('debug_scenario')||'';
+const PICKUP_CHEVRON_SVG=`<svg class="cargo-action-chevron" viewBox="0 0 640 640" aria-hidden="true"><path d="M342.6 105.4C330.1 92.9 309.8 92.9 297.3 105.4L137.3 265.4C124.8 277.9 124.8 298.2 137.3 310.7C149.8 323.2 170.1 323.2 182.6 310.7L320 173.3L457.4 310.6C469.9 323.1 490.2 323.1 502.7 310.6C515.2 298.1 515.2 277.8 502.7 265.3L342.7 105.3zM502.6 457.4L342.6 297.4C330.1 284.9 309.8 284.9 297.3 297.4L137.3 457.4C124.8 469.9 124.8 490.2 137.3 502.7C149.8 515.2 170.1 515.2 182.6 502.7L320 365.3L457.4 502.6C469.9 515.1 490.2 515.1 502.7 502.6C515.2 490.1 515.2 469.8 502.7 457.3z"/></svg>`;
+const DROPOFF_CHEVRON_SVG=`<svg class="cargo-action-chevron" viewBox="0 0 640 640" aria-hidden="true"><path d="M342.6 534.6C330.1 547.1 309.8 547.1 297.3 534.6L137.3 374.6C124.8 362.1 124.8 341.8 137.3 329.3C149.8 316.8 170.1 316.8 182.6 329.3L320 466.7L457.4 329.4C469.9 316.9 490.2 316.9 502.7 329.4C515.2 341.9 515.2 362.2 502.7 374.7L342.7 534.7zM502.6 182.6L342.6 342.6C330.1 355.1 309.8 355.1 297.3 342.6L137.3 182.6C124.8 170.1 124.8 149.8 137.3 137.3C149.8 124.8 170.1 124.8 182.6 137.3L320 274.7L457.4 137.4C469.9 124.9 490.2 124.9 502.7 137.4C515.2 149.9 515.2 170.2 502.7 182.7z"/></svg>`;
+const WAYPOINT_PROGRESS_KEY='sc-hauling-route-waypoint-progress-v1';let waypointProgress=loadWaypointProgress();function loadWaypointProgress(){try{const value=JSON.parse(localStorage.getItem(WAYPOINT_PROGRESS_KEY)||'{}');return value&&typeof value==='object'?value:{}}catch(_e){return{}}}function saveWaypointProgress(){try{localStorage.setItem(WAYPOINT_PROGRESS_KEY,JSON.stringify(waypointProgress))}catch(_e){}}function routeProgressKey(route){return String(route.input_hash||route.stops?.map(stop=>stop.stop_id||stop.location).join('|')||'route')}function manualWaypointPassed(stop,route,index){const noCargo=!(stop.pickups||[]).length&&!(stop.deliveries||[]).length;if(index===0&&stop.user_waypoint&&noCargo)return true;if(!stop.user_waypoint||!noCargo)return false;return(waypointProgress[routeProgressKey(route)]||[]).includes(String(stop.stop_id||''))}
+const COLORS={'hydrogen':'#63d8da','quartz':'#7165dc','copper':'#d57d47','iron':'#9198a5','iron (ore)':'#9198a5','titanium':'#c5ccd8','tungsten':'#767d8b','gold':'#d5b45a','aluminum':'#aeb7c3','aluminium':'#aeb7c3'};function colorFor(name){return COLORS[String(name||'').toLowerCase()]||'#7e86ad'}function fmt(value){const n=Number(value||0);return Number.isInteger(n)?String(n):n.toFixed(1).replace(/\.0$/,'')}function distance(km){const n=Number(km||0);if(!n)return'0 km';if(n>=1e6)return`${Math.ceil(n/1e6)} Gm`;if(n>=1e3)return`${Math.ceil(n/1e3)} Mm`;return`${Math.ceil(n)} km`}function cargoRun(ops){return ops.map((op,index)=>`${index?'<span class="cargo-sep">•</span>':''}<span class="cargo"><i style="--cargo-color:${colorFor(op.commodity)}"></i>${esc(op.commodity||'Cargo')} ${fmt(op.scu_value??op.scu)}</span>`).join('')}function cargoGroup(kind,ops,showIcon=false){if(!ops.length)return'';const loading=kind==='load',icon=loading?PICKUP_CHEVRON_SVG:DROPOFF_CHEVRON_SVG,label=loading?'Load cargo':'Unload cargo',iconMarkup=showIcon?`<span class="cargo-group-icon" role="img" aria-label="${label}" title="${label}">${icon}</span>`:'';return`<span class="cargo-group ${loading?'load-group':'unload-group'}">${iconMarkup}${cargoRun(ops)}</span>`}function cargoLine(pickups,deliveries){const mixed=pickups.length>0&&deliveries.length>0,items=mixed?`${cargoGroup('unload',deliveries,true)}${cargoGroup('load',pickups,true)}`:pickups.length?cargoGroup('load',pickups):cargoGroup('unload',deliveries);return`<div class="cargo-line"><div class="cargo-viewport"><div class="cargo-track"><span class="cargo-run">${items}</span><span class="cargo-run cargo-run-copy" aria-hidden="true">${items}</span></div></div></div>`}function initCargoTickers(){requestAnimationFrame(()=>document.querySelectorAll('.cargo-viewport').forEach(viewport=>{const run=viewport.querySelector('.cargo-run'),overflow=!!run&&run.scrollWidth>viewport.clientWidth+2;viewport.classList.toggle('is-overflowing',overflow);if(overflow)viewport.style.setProperty('--ticker-duration',`${Math.max(10,run.scrollWidth/18).toFixed(1)}s`)}))}
+function stopComplete(stop,data,index=-1){const route=data.route||{};if(stop.historical||['completed','skipped'].includes(stop.completion_state)||manualWaypointPassed(stop,route,index))return true;const pickups=stop.pickups||[],deliveries=stop.deliveries||[],checklist=data.checklist||{},loaded=new Set(data.loaded_member_identities||[]),completed=new Set((data.groups||[]).filter(g=>String(g.status||'').toUpperCase()==='COMPLETED').map(g=>String(g.mission_id||'').toLowerCase())),pickupsDone=!pickups.length||pickups.every(op=>{const member=String(op.member_identity||'');if(member&&loaded.has(member))return true;const ids=op.checklist_ids||[];return ids.length>0&&ids.every(id=>!!checklist[id])}),deliveriesDone=!deliveries.length||deliveries.every(op=>completed.has(String(op.contract_id||'').toLowerCase()));return(pickups.length>0||deliveries.length>0)&&pickupsDone&&deliveriesDone}
+function renderRouteMessage(message,progress,next='—',warning=false){$('progress').textContent=progress;$('stop').className='stop';lastStopMarkup=`<div class="empty${warning?' warning':''}"${warning?' style="color:var(--amber)"':''}>${esc(message)}</div>`;$('stop').innerHTML=lastStopMarkup;$('nextName').textContent=next;$('nextDistance').textContent='';$('remaining').textContent=''}
+function render(data){
+  cache=data;
+  const route=data.route||{},stops=route.stops||[];
+  if(!route.valid){renderRouteMessage('Calculate a route in SCHT to populate this overlay.','— / —');return}
+  if(route.outdated){renderRouteMessage('Route outdated. Recalculate it in SCHT.','OUTDATED','Recalculate in SCHT',true);return}
+  const currentIndex=stops.findIndex((stop,index)=>!stopComplete(stop,data,index));
+  if(currentIndex<0){renderRouteMessage('Route complete.',`${stops.length} / ${stops.length}`);return}
+  const current=stops[currentIndex],pickups=current.pickups||[],deliveries=current.deliveries||[];
+  const waypoint=!!current.user_waypoint&&!pickups.length&&!deliveries.length,mixed=pickups.length>0&&deliveries.length>0;
+  const kind=waypoint?'waypoint':mixed?'mixed':deliveries.length?'dropoff':'pickup',warning=(current.warnings||[]).length>0;
+  const pickupIds=[...new Set(pickups.flatMap(op=>op.checklist_ids||[]).filter(Boolean))],checklist=data.checklist||{};
+  const markLoaded=pickupIds.length&&!pickupIds.every(id=>!!checklist[id])?`<button class="stop-command load-command" type="button" data-mark-loaded data-stop-id="${esc(current.stop_id||'')}">MARK ALL LOADED</button>`:'';
+  const actionMarkup=waypoint?`<button class="stop-command" type="button" data-next-waypoint data-stop-id="${esc(current.stop_id||'')}"><span>NEXT WP</span><svg class="next-wp-chevron" viewBox="0 0 640 640" aria-hidden="true"><path d="M439.1 297.4L295.1 153.4C282.6 140.9 262.3 140.9 249.8 153.4C237.3 165.9 237.3 186.2 249.8 198.7L371.2 320L249.9 441.4C237.4 453.9 237.4 474.2 249.9 486.7C262.4 499.2 282.7 499.2 295.2 486.7L439.2 342.7C451.7 330.2 451.7 309.9 439.1 297.4z"/></svg></button>`:`${mixed?`<span class="action-item pickup-action">PICK UP ${PICKUP_CHEVRON_SVG}</span><span class="action-item dropoff-action">DROP OFF ${DROPOFF_CHEVRON_SVG}</span>`:deliveries.length?`<span class="action-item">DROP OFF ${DROPOFF_CHEVRON_SVG}</span>`:`<span class="action-item">PICK UP ${PICKUP_CHEVRON_SVG}</span>`}`;
+  const cargoMarkup=pickups.length||deliveries.length?cargoLine(pickups,deliveries):`<span class="cargo-empty">${waypoint?'Personal waypoint':'No cargo action'}</span>`;
+  const activeLegDistance=Number(current.distance_from_previous||0),locationContext=current.parent_body||'Unknown system';
+  const stopMarkup=`<span class="stop-number">${esc(current.number||currentIndex+1)}</span><div class="stop-copy"><h2 class="stop-name">${esc(current.location||'Unknown stop')}</h2><small class="stop-location-meta">${esc(locationContext)} · QT ${distance(activeLegDistance)}</small><div class="stop-detail">${cargoMarkup}</div></div><span class="stop-actions">${markLoaded}<span class="action-label">${actionMarkup}</span></span>`;
+  $('progress').textContent=`${current.number||currentIndex+1} / ${stops.length}`;
+  $('stop').className=`stop ${kind}${warning?' warning':''}`;
+  if(stopMarkup!==lastStopMarkup){lastStopMarkup=stopMarkup;$('stop').innerHTML=stopMarkup;initCargoTickers()}
+  const next=stops[currentIndex+1];
+  const remaining=stops.slice(currentIndex).reduce((sum,stop)=>sum+Number(stop.distance_from_previous||0),0);
+  $('nextName').textContent=next?.location||'Final stop';
+  $('nextDistance').textContent=next?`· QT ${distance(next.distance_from_previous)}`:'';
+  $('remaining').textContent=remaining?`${distance(remaining)} remaining`:'';
+}
+function findOverlayStop(stopId){return(cache?.route?.stops||[]).find(stop=>String(stop.stop_id||'')===String(stopId||''))}function advanceWaypoint(stop){if(!stop||!cache)return;const route=cache.route||{},key=routeProgressKey(route),passed=new Set(waypointProgress[key]||[]);passed.add(String(stop.stop_id||''));waypointProgress[key]=[...passed];saveWaypointProgress();render(cache)}async function markAllLoaded(stop,button){const ids=[...new Set((stop?.pickups||[]).flatMap(op=>op.checklist_ids||[]).filter(Boolean))];if(!ids.length||!cache)return;button.disabled=true;const checklist={...(cache.checklist||{})};ids.forEach(id=>checklist[id]=true);if(debugScenario){cache.checklist=checklist;render(cache);return}try{const response=await fetch('/api/checklist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'replace',checklist})}),result=await response.json();if(!response.ok||!result.ok)throw new Error(result.error||'Checklist update failed');cache.checklist={...(result.checklist||checklist)};render(cache)}catch(_e){button.disabled=false;$('nextName').textContent='Checklist update failed'}}
+$('stop').addEventListener('click',event=>{const nextButton=event.target.closest('[data-next-waypoint]');if(nextButton){advanceWaypoint(findOverlayStop(nextButton.dataset.stopId));return}const loadButton=event.target.closest('[data-mark-loaded]');if(loadButton)markAllLoaded(findOverlayStop(loadButton.dataset.stopId),loadButton)});
+async function refresh(){try{const endpoint=debugScenario?`/api/debug/route-overlay-state?scenario=${encodeURIComponent(debugScenario)}`:'/api/state',r=await fetch(endpoint,{cache:'no-store'});if(!r.ok)throw new Error(r.status);render(await r.json())}catch(_e){$('nextName').textContent='Tracker offline'}}
+const controlPort=Number(params.get('overlay_control_port')||0),controlToken=params.get('overlay_control_token')||'';async function native(name,...args){try{if(typeof window.pywebview?.api?.[name]==='function')return await window.pywebview.api[name](...args);if(!controlPort||!controlToken)throw new Error('No native bridge');const r=await fetch(`http://127.0.0.1:${controlPort}/command`,{method:'POST',headers:{'Content-Type':'application/json','X-SC-Overlay-Token':controlToken},body:JSON.stringify({name,args})}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'Command failed');return j.result}catch(_e){return null}}
+function applySwitch(id,value){$(id).setAttribute('aria-pressed',value?'true':'false')}window.applyNativeSettings=status=>{if(!status)return;nativeSettings={...nativeSettings,...status};document.body.classList.toggle('position-locked',!!nativeSettings.position_locked);$('pinBtn').classList.toggle('active',!!nativeSettings.position_locked);const pinLabel=nativeSettings.position_locked?'Unlock position':'Lock position';$('pinBtn').title=pinLabel;$('pinBtn').setAttribute('aria-label',pinLabel);$('opacityRange').value=String(Math.round(Number(nativeSettings.opacity||.95)*100));applySwitch('onTopSwitch',nativeSettings.on_top!==false)};
+$('dragRegion').addEventListener('pointerdown',event=>{if(event.button!==0||nativeSettings.position_locked||event.detail>1)return;event.preventDefault();native('begin_overlay_move').then(window.applyNativeSettings)});$('pinBtn').addEventListener('click',()=>native('set_overlay_position_locked',!nativeSettings.position_locked).then(window.applyNativeSettings));$('settingsBtn').addEventListener('click',event=>{event.stopPropagation();const opening=$('settingsMenu').hidden;$('settingsMenu').hidden=!opening;$('settingsBtn').setAttribute('aria-expanded',opening?'true':'false')});document.addEventListener('pointerdown',event=>{if(!event.target.closest('#settingsMenu')&&!event.target.closest('#settingsBtn')){$('settingsMenu').hidden=true;$('settingsBtn').setAttribute('aria-expanded','false')}});let opacityTimer;$('opacityRange').addEventListener('input',event=>{clearTimeout(opacityTimer);opacityTimer=setTimeout(()=>native('set_overlay_opacity',Number(event.target.value)/100).then(window.applyNativeSettings),40)});$('onTopSwitch').addEventListener('click',()=>native('set_overlay_on_top',nativeSettings.on_top===false).then(window.applyNativeSettings));$('minBtn').addEventListener('click',()=>native('minimize_overlay'));$('closeBtn').addEventListener('click',()=>native('hide_overlay'));async function loadSettings(){window.applyNativeSettings(await native('get_overlay_status'))}window.addEventListener('pywebviewready',loadSettings);setTimeout(loadSettings,120);refresh();setInterval(refresh,900);
 </script>
 </body>
 </html>'''
@@ -6423,10 +7120,15 @@ class OverlayChildApi:
         "se": 17,  # HTBOTTOMRIGHT
     }
 
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, overlay_kind: str = "logistics"):
         self.base_url = base_url.rstrip("/")
+        self.overlay_kind = "route" if overlay_kind == "route" else "logistics"
         self.window = None
-        self.settings_path = app_data_directory() / "overlay-window.json"
+        self.settings_path = app_data_directory() / (
+            "route-overlay-window.json" if self.overlay_kind == "route" else "overlay-window.json"
+        )
+        self.min_width, self.min_height = ((440, 150) if self.overlay_kind == "route" else (380, 360))
+        self.default_width, self.default_height = ((500, 160) if self.overlay_kind == "route" else (430, 620))
         self._lock = threading.RLock()
         self._save_timer: Optional[threading.Timer] = None
         self._last_logged_hwnd: Optional[int] = None
@@ -6439,14 +7141,19 @@ class OverlayChildApi:
             self.opacity = max(0.50, min(1.0, float(self.settings.get("opacity", 1.0))))
         except Exception:
             self.opacity = 1.0
-        self.size_locked = bool(self.settings.get("size_locked", False))
+        self.size_locked = True if self.overlay_kind == "route" else bool(self.settings.get("size_locked", False))
         self.position_locked = bool(self.settings.get("position_locked", False))
         self.on_top = bool(self.settings.get("on_top", True))
         try:
-            self.width = max(380, int(self.settings.get("width", 430) or 430))
-            self.height = max(360, int(self.settings.get("height", 620) or 620))
+            if self.overlay_kind == "route":
+                # Compact route overlays have a fixed layout; do not retain the
+                # larger 560x210 dimensions saved by the first implementation.
+                self.width, self.height = self.default_width, self.default_height
+            else:
+                self.width = max(self.min_width, int(self.settings.get("width", self.default_width) or self.default_width))
+                self.height = max(self.min_height, int(self.settings.get("height", self.default_height) or self.default_height))
         except Exception:
-            self.width, self.height = 430, 620
+            self.width, self.height = self.default_width, self.default_height
         self.visible = True
 
     @staticmethod
@@ -6479,8 +7186,8 @@ class OverlayChildApi:
 
     def geometry(self) -> dict:
         left, top, work_w, work_h = self.primary_work_area()
-        width = min(max(380, self.width), max(380, work_w - 40))
-        height = min(max(360, self.height), max(360, work_h - 40))
+        width = min(max(self.min_width, self.width), max(self.min_width, work_w - 40))
+        height = min(max(self.min_height, self.height), max(self.min_height, work_h - 40))
         return {
             "x": int(left + max(0, (work_w - width) // 2)),
             "y": int(top + max(0, (work_h - height) // 2)),
@@ -6658,8 +7365,8 @@ class OverlayChildApi:
 
     def _finish_native_resize(self, width: int, height: int) -> None:
         with self._lock:
-            self.width = max(380, int(width))
-            self.height = max(360, int(height))
+            self.width = max(self.min_width, int(width))
+            self.height = max(self.min_height, int(height))
         self._schedule_save()
 
     def begin_overlay_resize(self, direction: str) -> dict:
@@ -6696,8 +7403,8 @@ class OverlayChildApi:
                 run_borderless_resize_loop(
                     hwnd,
                     direction_key,
-                    380,
-                    360,
+                    self.min_width,
+                    self.min_height,
                     on_complete=self._finish_native_resize,
                     diagnostic=overlay_diagnostic_log,
                 )
@@ -6829,8 +7536,8 @@ class OverlayChildApi:
         if width <= 0 or height <= 0:
             return
         with self._lock:
-            self.width = max(380, width)
-            self.height = max(360, height)
+            self.width = max(self.min_width, width)
+            self.height = max(self.min_height, height)
         self._schedule_save()
 
     def _on_closed(self, *args) -> None:
@@ -7068,6 +7775,7 @@ class OverlayProcessController(OverlayController):
     def __init__(self, webview_module, base_url: str):
         super().__init__(webview_module, base_url)
         self._overlay_process: Optional[subprocess.Popen] = None
+        self._route_overlay_process: Optional[subprocess.Popen] = None
         self.overlay_window = None
 
     def _overlay_process_alive(self) -> bool:
@@ -7094,10 +7802,34 @@ class OverlayProcessController(OverlayController):
             except Exception:
                 pass
 
-    def _spawn_overlay_process(self) -> dict:
-        self._terminate_overlay_process()
+    def _route_overlay_process_alive(self) -> bool:
+        process = self._route_overlay_process
+        return bool(process is not None and process.poll() is None)
+
+    def _terminate_route_overlay_process(self) -> None:
+        process = self._route_overlay_process
+        self._route_overlay_process = None
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=2.0)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+    def _spawn_overlay_process(self, overlay_kind: str = "logistics") -> dict:
+        route_overlay = overlay_kind == "route"
+        if route_overlay:
+            self._terminate_route_overlay_process()
+        else:
+            self._terminate_overlay_process()
         command = self._self_launch_command() + [
             "--overlay-child",
+            "--overlay-kind",
+            "route" if route_overlay else "logistics",
             "--base-url",
             self.base_url,
             "--parent-pid",
@@ -7120,7 +7852,10 @@ class OverlayProcessController(OverlayController):
         except Exception as exc:
             overlay_diagnostic_log(f"overlay companion launch failed: {exc!r}")
             return {**self.get_overlay_status(), "error": str(exc)}
-        self._overlay_process = process
+        if route_overlay:
+            self._route_overlay_process = process
+        else:
+            self._overlay_process = process
         # Popen returns immediately; a short poll catches only immediate startup
         # failures without blocking the dashboard while WebView2 initializes.
         time.sleep(0.04)
@@ -7133,6 +7868,16 @@ class OverlayProcessController(OverlayController):
     def open_overlay(self) -> dict:
         with self._lock:
             return self._spawn_overlay_process()
+
+    def open_route_overlay(self) -> dict:
+        with self._lock:
+            status = self._spawn_overlay_process("route")
+            return {**status, "route_overlay_visible": self._route_overlay_process_alive()}
+
+    def hide_route_overlay(self) -> dict:
+        with self._lock:
+            self._terminate_route_overlay_process()
+            return {**self.get_overlay_status(), "route_overlay_visible": False}
 
     def hide_overlay(self) -> dict:
         with self._lock:
@@ -7214,6 +7959,7 @@ class OverlayProcessController(OverlayController):
                 return
             self._shutting_down = True
         self._terminate_overlay_process()
+        self._terminate_route_overlay_process()
         if self._ocr_notifier is not None:
             self._ocr_notifier.shutdown()
         self._save_main_settings_now()
@@ -7225,9 +7971,10 @@ class OverlayProcessController(OverlayController):
                 pass
 
 
-def run_overlay_child(base_url: str, parent_pid: Optional[int] = None) -> int:
-    """Run the compact Logistics Overlay in a dedicated pywebview process."""
-    overlay_diagnostic_log(f"overlay child starting; base_url={base_url!r}; parent_pid={parent_pid!r}")
+def run_overlay_child(base_url: str, parent_pid: Optional[int] = None, overlay_kind: str = "logistics") -> int:
+    """Run one compact overlay in a dedicated pywebview process."""
+    overlay_kind = "route" if overlay_kind == "route" else "logistics"
+    overlay_diagnostic_log(f"{overlay_kind} overlay child starting; base_url={base_url!r}; parent_pid={parent_pid!r}")
     try:
         import webview  # type: ignore
     except Exception as exc:
@@ -7235,7 +7982,7 @@ def run_overlay_child(base_url: str, parent_pid: Optional[int] = None) -> int:
         show_native_message("SC Hauling Overlay startup error", str(exc), error=True)
         return 1
 
-    api = OverlayChildApi(base_url)
+    api = OverlayChildApi(base_url, overlay_kind)
     control_server = OverlayCommandServer(api)
     control_server.start()
     geometry = api.geometry()
@@ -7245,14 +7992,14 @@ def run_overlay_child(base_url: str, parent_pid: Optional[int] = None) -> int:
         "overlay_control_token": control_server.token,
     })
     kwargs = dict(
-        title="SC Hauling Overlay",
-        url=base_url.rstrip("/") + "/overlay?" + overlay_query,
+        title="SCHT Route Planner" if overlay_kind == "route" else "SC Hauling Overlay",
+        url=base_url.rstrip("/") + ("/route-overlay?" if overlay_kind == "route" else "/overlay?") + overlay_query,
         js_api=api,
         width=geometry["width"],
         height=geometry["height"],
         x=geometry["x"],
         y=geometry["y"],
-        min_size=(380, 360),
+        min_size=(api.min_width, api.min_height),
         resizable=False,
         hidden=False,
         frameless=True,
@@ -7297,7 +8044,7 @@ def run_overlay_child(base_url: str, parent_pid: Optional[int] = None) -> int:
         watcher = threading.Thread(target=parent_watch, daemon=True, name="sc-hauling-overlay-parent-watch")
         watcher.start()
 
-    storage_path = app_data_directory() / "overlay-webview"
+    storage_path = app_data_directory() / ("route-overlay-webview" if overlay_kind == "route" else "overlay-webview")
     storage_path.mkdir(parents=True, exist_ok=True)
     exit_code = 0
     try:
@@ -7316,7 +8063,7 @@ def run_overlay_child(base_url: str, parent_pid: Optional[int] = None) -> int:
     return exit_code
 
 
-def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True, port_callback=None, desktop_bridge=None) -> None:
+def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True, port_callback=None, desktop_bridge=None, browser_path: str = "/") -> None:
     """Run the production-style local web dashboard.
 
     The older Tkinter UI cannot closely match the selected sci-fi concept render.
@@ -7370,6 +8117,44 @@ def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1"
             self.checklist = {str(k): True for k, v in raw_checklist.items() if v}
             self.contract_overrides_path = app_data_directory() / "contract-overrides.json"
             self.contract_overrides = normalize_contract_overrides(_read_json_object(self.contract_overrides_path))
+            self.location_overrides_path = app_data_directory() / "contract-location-overrides.json"
+            self.location_overrides = normalize_location_overrides(_read_json_object(self.location_overrides_path))
+            self.workaround_settings_path = app_data_directory() / "known-workarounds.json"
+            workaround_settings = _read_json_object(self.workaround_settings_path)
+            self.multi_pickup_bug_default = bool(workaround_settings.get("multi_pickup_bug_fix", False))
+            self.operational_missions: List[CargoMission] = []
+            self.operational_notices: dict = {}
+            self.route_settings_path = app_data_directory() / "route-settings.json"
+            route_settings = _read_json_object(self.route_settings_path)
+            # Route planning is free-start and capacity-independent. Old values
+            # are intentionally ignored while the rest of v2 settings migrate.
+            self.route_start = ""
+            self.route_scope = str(route_settings.get("scope") or "all").lower()
+            if self.route_scope not in {"all", "selected"}:
+                self.route_scope = "all"
+            self.route_capacity = 0.0
+            self.route_selected_contracts = [str(value).casefold() for value in route_settings.get("selected_contracts") or []]
+            self.route_preset = str(route_settings.get("active_preset") or self.route_scope).lower()
+            if self.route_preset not in {"all", "selected", "custom", "custom_draft"}:
+                self.route_preset = "all"
+            raw_workspaces = route_settings.get("workspaces") or {}
+            self.route_workspaces = {
+                str(key): dict(value) for key, value in raw_workspaces.items()
+                if str(key) in {"all", "selected", "custom", "custom_draft"} and isinstance(value, dict)
+            }
+            self.route_plan: Optional[dict] = self.route_workspaces.get(self.route_preset)
+            self.location_aliases_path = app_data_directory() / "location-aliases.json"
+            raw_location_aliases = _read_json_object(self.location_aliases_path)
+            self.location_aliases = {
+                str(captured).strip(): str(canonical).strip()
+                for captured, canonical in raw_location_aliases.items()
+                if captured != "version" and str(captured).strip() and str(canonical).strip()
+            }
+            self.location_catalog = LOCATION_CATALOG.with_aliases(self.location_aliases)
+            self.route_waypoints = [
+                str(value) for value in route_settings.get("waypoints") or []
+                if str(value) in self.location_catalog.by_id
+            ]
             self.deleted_contracts_path = app_data_directory() / "deleted-contracts.json"
             raw_deleted = _read_json_object(self.deleted_contracts_path)
             self.deleted_contract_ids = {
@@ -7434,6 +8219,63 @@ def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1"
         def _save_contract_overrides(self) -> None:
             _write_json_object(self.contract_overrides_path, dict(self.contract_overrides))
 
+        def _save_location_overrides(self) -> None:
+            _write_json_object(self.location_overrides_path, self.location_overrides)
+
+        def _save_workaround_settings(self) -> None:
+            _write_json_object(self.workaround_settings_path, {
+                "version": 1, "multi_pickup_bug_fix": bool(self.multi_pickup_bug_default),
+            })
+
+        def _save_route_settings(self) -> None:
+            _write_json_object(self.route_settings_path, {
+                "version": 5, "scope": self.route_scope,
+                "active_preset": self.route_preset,
+                "selected_contracts": self.route_selected_contracts,
+                "waypoints": self.route_waypoints,
+                "workspaces": self.route_workspaces,
+            })
+
+        def _store_active_route(self) -> None:
+            if self.route_plan:
+                self.route_plan["preset"] = self.route_preset
+                self.route_workspaces[self.route_preset] = self.route_plan
+            else:
+                self.route_workspaces.pop(self.route_preset, None)
+            self._save_route_settings()
+
+        def _save_location_aliases(self) -> None:
+            _write_json_object(self.location_aliases_path, {
+                "version": 1, **dict(sorted(self.location_aliases.items(), key=lambda item: item[0].casefold())),
+            })
+
+        def _invalidate_route(self) -> None:
+            changed = False
+            for plan in self.route_workspaces.values():
+                if plan and not plan.get("outdated"):
+                    plan["outdated"] = True
+                    changed = True
+            if self.route_plan:
+                self.route_plan["outdated"] = True
+            if changed:
+                self._save_route_settings()
+
+        def _invalidate_routes_with_changed_contract_inputs(self) -> None:
+            """Keep routes live across progress events; invalidate only changed cargo topology."""
+            changed = False
+            for plan in self.route_workspaces.values():
+                if plan and not plan.get("outdated") and not route_plan_contract_inputs_match(
+                    plan, self.operational_missions,
+                ):
+                    plan["outdated"] = True
+                    changed = True
+            if self.route_plan and not route_plan_contract_inputs_match(
+                self.route_plan, self.operational_missions,
+            ):
+                self.route_plan["outdated"] = True
+            if changed:
+                self._save_route_settings()
+
         def _save_deleted_contracts(self) -> None:
             _write_json_object(self.deleted_contracts_path, {"mission_ids": sorted(self.deleted_contract_ids)})
 
@@ -7451,18 +8293,114 @@ def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1"
             valid = {}
             changed = False
             for mission_id, override in self.contract_overrides.items():
-                if str((override or {}).get("source") or "manual").lower() == "ocr" and (override or {}).get("objectives"):
-                    group = groups_by_id.get(str(mission_id or "").lower())
+                override = dict(override or {})
+                group = groups_by_id.get(str(mission_id or "").lower())
+                if group and override.get("objectives"):
+                    restored_objectives = restore_contract_objective_metadata(override["objectives"], group)
+                    if restored_objectives != override["objectives"]:
+                        override["objectives"] = restored_objectives
+                        changed = True
+                if (
+                    str((override or {}).get("source") or "manual").lower() == "ocr"
+                    and (override or {}).get("objectives")
+                    and not bool((override or {}).get("validated"))
+                ):
                     if group:
                         validation = validate_ocr_contract_details(override, group)
                         if not validation.get("ok"):
                             changed = True
                             continue
+                        override["validated"] = True
+                        changed = True
                 valid[mission_id] = override
             if changed:
                 self.contract_overrides = valid
                 self._save_contract_overrides()
             return valid
+
+        def _sync_automatic_bug_overrides(self) -> None:
+            """Keep automatic per-contract state aligned with the global toggle."""
+            contracts = self.location_overrides.setdefault("contracts", {})
+            changed = False
+            for group in contract_groups(self.missions):
+                key = (group[0].mission_id or "").casefold()
+                if not key:
+                    continue
+                existing = contracts.get(key) or {}
+                if existing.get("changed_by") == "user":
+                    continue
+                assessment = multi_pickup_bug_assessment(group)
+                if not assessment.get("matches_shape"):
+                    continue
+                enable = bool(self.multi_pickup_bug_default and assessment.get("matches_shape") and assessment.get("selected_pickup_id"))
+                selected_id = assessment.get("selected_pickup_id") or ""
+                selected_name = assessment.get("selected_pickup_name") or ""
+                overrides = []
+                for mission in group:
+                    location_id = contract_location_id(mission, "pickup", mission.pickup_source_order)
+                    overrides.append({
+                        "contract_location_id": location_id,
+                        "ignored": bool(enable and location_id != selected_id),
+                        "reason": "known_multi_pickup_bug", "changed_by": "automatic",
+                    })
+                updated = {
+                    "mode": "enabled" if enable else "disabled",
+                    "selected_pickup_id": selected_id, "selected_pickup_name": selected_name,
+                    "changed_by": "automatic", "overrides": overrides,
+                }
+                if existing != updated:
+                    contracts[key] = updated
+                    changed = True
+            if changed:
+                self._save_location_overrides()
+
+        def _restore_collapsed_multi_pickup_override_shapes(self) -> int:
+            """Re-expand saved one-row corrections from untouched log rows.
+
+            OCR or an editor save may retain only the selected operational pickup.
+            The global workaround must still be reversible, so rebuild the shared
+            pickup candidates from ``base_missions`` while retaining the corrected
+            cargo, payout, and destination data in the saved override.
+            """
+            restored = 0
+            for base_group in contract_groups(self._visible_base_missions()):
+                if not base_group or not base_group[0].mission_id:
+                    continue
+                key = (base_group[0].mission_id or "").casefold()
+                override = self.contract_overrides.get(key)
+                objectives = list((override or {}).get("objectives") or [])
+                pickups = list(dict.fromkeys(mission.pickup for mission in base_group if mission.pickup))
+                dropoffs = list(dict.fromkeys(mission.dropoff for mission in base_group if mission.dropoff))
+                aggregate_owner = next((mission for mission in base_group if mission.is_aggregate_load_plannable()), None)
+                if len(objectives) != 1 or len(pickups) < 2 or len(dropoffs) != 1 or aggregate_owner is None:
+                    continue
+                corrected = dict(objectives[0])
+                corrected_scu = str(corrected.get("scu") or aggregate_owner.scu or "")
+                corrected_commodity = str(corrected.get("commodity") or aggregate_owner.commodity or "")
+                corrected_dropoff = str(corrected.get("dropoff") or aggregate_owner.dropoff or "")
+                primary_pickups = list(corrected.get("primary_pickup_occurrences") or [])
+                rebuilt = []
+                for index, mission in enumerate(base_group):
+                    rebuilt.append({
+                        "pickup": mission.pickup,
+                        "dropoff": corrected_dropoff,
+                        "commodity": corrected_commodity,
+                        "scu": corrected_scu if index == 0 else "",
+                        "provenance": corrected.get("provenance") or "manual",
+                        "quantity_scope": "aggregate",
+                        "pickup_source_section": mission.pickup_source_section,
+                        "pickup_source_order": mission.pickup_source_order,
+                        "pickup_raw_text": mission.pickup_raw_text,
+                        "pickup_parent": mission.pickup_parent,
+                        "primary_pickup_occurrences": primary_pickups,
+                    })
+                updated = dict(override)
+                updated["objectives"] = rebuilt
+                self.contract_overrides[key] = updated
+                restored += 1
+            if restored:
+                self._save_contract_overrides()
+            return restored
 
         def _refresh_contract_overrides(self) -> None:
             base_missions = self._visible_base_missions()
@@ -7470,18 +8408,869 @@ def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1"
             self.missions = apply_contract_overrides(base_missions, combined)
             apply_completion_events(self.missions, self.events)
             self.missions = merge_missions(self.missions)
+            self._sync_automatic_bug_overrides()
+            self.operational_missions, self.operational_notices = operational_contracts(self.missions, self.location_overrides)
+            self._invalidate_routes_with_changed_contract_inputs()
 
-        def save_contract_override(self, mission_id: str, payout, objectives, contracted_by: str = "", source: str = "manual") -> dict:
+        def toggle_multi_pickup_bug_default(self) -> None:
+            with self.lock:
+                self.multi_pickup_bug_default = not self.multi_pickup_bug_default
+                self._save_workaround_settings()
+                self._restore_collapsed_multi_pickup_override_shapes()
+                # Rebuild the corrected mission rows before applying the newly
+                # selected global mode to every matching contract.
+                base_missions = self._visible_base_missions()
+                combined = merged_contract_overrides(self._validated_contract_overrides(base_missions))
+                self.missions = apply_contract_overrides(base_missions, combined)
+                apply_completion_events(self.missions, self.events)
+                self.missions = merge_missions(self.missions)
+                changed = 0
+                review = 0
+                contracts = self.location_overrides.setdefault("contracts", {})
+                for group in contract_groups(self.missions):
+                    key = (group[0].mission_id or "").casefold()
+                    if not key:
+                        continue
+                    existing = contracts.get(key) or {}
+                    assessment = multi_pickup_bug_assessment(group)
+                    if not assessment.get("matches_shape"):
+                        continue
+                    enable = bool(self.multi_pickup_bug_default and assessment.get("matches_shape") and assessment.get("selected_pickup_id"))
+                    if self.multi_pickup_bug_default and not assessment.get("selected_pickup_id"):
+                        review += 1
+                    selected_id = assessment.get("selected_pickup_id") or ""
+                    selected_name = assessment.get("selected_pickup_name") or ""
+                    overrides = []
+                    for mission in group:
+                        location_id = contract_location_id(mission, "pickup", mission.pickup_source_order)
+                        overrides.append({
+                            "contract_location_id": location_id,
+                            "ignored": bool(enable and location_id != selected_id),
+                            "reason": "known_multi_pickup_bug", "changed_by": "automatic",
+                        })
+                    contracts[key] = {
+                        "mode": "enabled" if enable else "disabled",
+                        "selected_pickup_id": selected_id, "selected_pickup_name": selected_name,
+                        "changed_by": "automatic", "overrides": overrides,
+                    }
+                    changed += 1
+                self._save_location_overrides()
+                self._refresh_contract_overrides()
+                state = "enabled" if self.multi_pickup_bug_default else "disabled"
+                self.status = f"Multi-pickup bug fix {state} for {changed - review} current matching contract(s)."
+                if review:
+                    self.status += f" {review} require pickup-order review."
+
+        def set_contract_bug_fix(self, mission_id: str, enabled: bool, selected_pickup_id: str = "", selected_pickup_name: str = "", changed_by: str = "user") -> None:
+            key = str(mission_id or "").strip().casefold()
+            if not key:
+                raise ValueError("MissionId is required.")
+            with self.lock:
+                group = next((g for g in contract_groups(self.missions) if (g[0].mission_id or "").casefold() == key), None)
+                if not group:
+                    raise ValueError("Contract not found.")
+                assessment = multi_pickup_bug_assessment(group)
+                selected_pickup_id = str(selected_pickup_id or assessment.get("selected_pickup_id") or "")
+                selected_pickup_name = str(selected_pickup_name or assessment.get("selected_pickup_name") or "")
+                if enabled and not selected_pickup_name:
+                    raise ValueError("Select the valid pickup before enabling the workaround.")
+                overrides = []
+                for mission in group:
+                    location_id = contract_location_id(mission, "pickup", mission.pickup_source_order)
+                    ignored = enabled and location_id != selected_pickup_id and mission.pickup.casefold() != selected_pickup_name.casefold()
+                    overrides.append({
+                        "contract_location_id": location_id, "ignored": ignored,
+                        "reason": "known_multi_pickup_bug", "changed_by": changed_by,
+                    })
+                self.location_overrides.setdefault("contracts", {})[key] = {
+                    "mode": "enabled" if enabled else "disabled",
+                    "selected_pickup_id": selected_pickup_id,
+                    "selected_pickup_name": selected_pickup_name,
+                    "changed_by": changed_by, "overrides": overrides,
+                }
+                self._save_location_overrides()
+                self._refresh_contract_overrides()
+                self.status = "Contract operational pickup view updated."
+
+        def _initialize_contract_bug_default(self, mission_id: str) -> None:
+            key = str(mission_id or "").strip().casefold()
+            if not key or key in self.location_overrides.get("contracts", {}):
+                return
+            group = next((g for g in contract_groups(self.missions) if (g[0].mission_id or "").casefold() == key), None)
+            if not group:
+                return
+            assessment = multi_pickup_bug_assessment(group)
+            if not assessment.get("matches_shape"):
+                return
+            enabled = bool(self.multi_pickup_bug_default and assessment.get("matches_shape") and assessment.get("selected_pickup_id"))
+            self.set_contract_bug_fix(key, enabled, assessment.get("selected_pickup_id") or "", assessment.get("selected_pickup_name") or "", changed_by="automatic")
+
+        def save_contract_override(self, mission_id: str, payout, objectives, contracted_by: str = "", source: str = "manual", validated: bool = False) -> dict:
             mission_id = str(mission_id or "").strip().lower()
-            normalized = normalize_contract_overrides({mission_id: {"payout": payout, "objectives": objectives, "contracted_by": contracted_by, "source": source}})
+            objectives = canonicalize_contract_objective_locations(objectives, self.location_catalog)
+            normalized = normalize_contract_overrides({mission_id: {
+                "payout": payout, "objectives": objectives, "contracted_by": contracted_by,
+                "source": source, "validated": bool(validated),
+            }})
             if not mission_id or mission_id not in normalized:
                 raise ValueError("A MissionId and contract details are required.")
             with self.lock:
                 self.contract_overrides[mission_id] = normalized[mission_id]
                 self._save_contract_overrides()
                 self._refresh_contract_overrides()
+                self._initialize_contract_bug_default(mission_id)
                 self.status = "Contract details saved."
                 return normalized[mission_id]
+
+        def route_waypoint_payloads(self) -> list[dict]:
+            return [
+                self.location_catalog.by_id[location_id].payload()
+                for location_id in self.route_waypoints
+                if location_id in self.location_catalog.by_id
+            ]
+
+        def set_route_scope(self, scope: str, selected_contracts: Sequence[str]) -> None:
+            scope = str(scope or "all").lower()
+            if scope not in {"all", "selected"}:
+                raise ValueError("Route scope must be all or selected.")
+            with self.lock:
+                self.route_scope = scope
+                self.route_preset = scope
+                self.route_selected_contracts = [str(value).strip().casefold() for value in selected_contracts if str(value).strip()]
+                self.route_plan = self.route_workspaces.get(self.route_preset)
+                self._save_route_settings()
+
+        def activate_route_preset(self, preset: str) -> Optional[dict]:
+            preset = str(preset or "all").lower()
+            if preset not in {"all", "selected", "custom"}:
+                raise ValueError("Route preset must be all, selected, or custom.")
+            with self.lock:
+                if preset == "custom" and not self.route_workspaces.get("custom"):
+                    raise ValueError("Confirm an edited route before opening the Custom preset.")
+                self.route_preset = preset
+                if preset in {"all", "selected"}:
+                    self.route_scope = preset
+                self.route_plan = self.route_workspaces.get(preset)
+                if self.route_plan:
+                    self.route_selected_contracts = [
+                        str(value).casefold() for value in self.route_plan.get("selected_contracts") or []
+                    ]
+                self._save_route_settings()
+                return self.route_plan
+
+        def add_route_waypoint(self, location: str) -> dict:
+            match = self.location_catalog.resolve(location)
+            if not match.record:
+                raise ValueError("Choose a known location to add as a waypoint.")
+            with self.lock:
+                if match.record.id not in self.route_waypoints:
+                    self.route_waypoints.append(match.record.id)
+                    self._save_route_settings()
+                return match.record.payload()
+
+        def remove_route_waypoint(self, location_id: str) -> None:
+            with self.lock:
+                self.route_waypoints = [value for value in self.route_waypoints if value != str(location_id or "")]
+                self._save_route_settings()
+
+        def clear_active_route(self) -> None:
+            with self.lock:
+                if self.route_preset == "custom_draft":
+                    source_preset = str((self.route_plan or {}).get("source_preset") or "all")
+                    if source_preset not in {"all", "selected", "custom"}:
+                        source_preset = "all"
+                    self.route_workspaces.pop("custom_draft", None)
+                    self.route_preset = source_preset
+                    self.route_scope = source_preset if source_preset in {"all", "selected"} else self.route_scope
+                    self.route_plan = self.route_workspaces.get(source_preset)
+                    self._save_route_settings()
+                    return
+                self.route_workspaces.pop(self.route_preset, None)
+                self.route_plan = None
+                self._save_route_settings()
+
+        def _route_stop_complete(self, stop: dict) -> bool:
+            logistics = logistics_sections(self.operational_missions)
+            loaded_members = set(loaded_logistics_member_identities(logistics, self.checklist))
+            completed_contracts = {
+                (group[0].mission_id or "").casefold()
+                for group in contract_groups(self.missions) if group and group_completed(group)
+            }
+            pickups = list(stop.get("pickups") or [])
+            deliveries = list(stop.get("deliveries") or [])
+            pickups_complete = not pickups or all(
+                str(operation.get("member_identity") or "") in loaded_members
+                or bool(operation.get("checklist_ids")) and all(
+                    self.checklist.get(str(item_id)) for item_id in operation.get("checklist_ids") or []
+                )
+                for operation in pickups
+            )
+            deliveries_complete = not deliveries or all(
+                str(operation.get("contract_id") or "").casefold() in completed_contracts
+                for operation in deliveries
+            )
+            return bool(pickups or deliveries) and pickups_complete and deliveries_complete
+
+        @staticmethod
+        def _route_stop_identity(stop: dict) -> str:
+            waypoint_uid = str(stop.get("waypoint_uid") or "")
+            if waypoint_uid:
+                return "route-user-" + waypoint_uid
+            operation_ids = sorted(
+                str(operation.get("id") or "")
+                for operation in [*(stop.get("pickups") or []), *(stop.get("deliveries") or [])]
+            )
+            seed = "\x1f".join([str(stop.get("location_id") or stop.get("location") or ""), *operation_ids])
+            return "route-" + hashlib.sha1(seed.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+        def _recalculate_route_stops(self, stops: Sequence[dict], distance_cache) -> Tuple[list[dict], Optional[float]]:
+            updated = []
+            cumulative = 0.0
+            all_known = True
+            previous = ""
+            for number, original in enumerate(stops, 1):
+                stop = dict(original)
+                location_id = str(stop.get("location_id") or "")
+                distance = 0.0 if not previous else distance_cache.distance(previous, location_id)
+                if distance is None:
+                    all_known = False
+                else:
+                    cumulative += float(distance)
+                stop["number"] = number
+                stop["stop_id"] = str(stop.get("stop_id") or self._route_stop_identity(stop))
+                stop["distance_from_previous"] = round(float(distance), 1) if distance is not None else None
+                stop["cumulative_distance"] = round(cumulative, 1) if all_known else None
+                updated.append(stop)
+                previous = location_id
+            return updated, round(cumulative, 1) if all_known else None
+
+        def _insert_custom_waypoints_optimally(
+            self, stops: Sequence[dict], waypoints: Sequence[dict], distance_cache,
+        ) -> list[dict]:
+            """Insert preserved user stops without losing duplicates or waypoint identity."""
+            ordered = [json.loads(json.dumps(stop)) for stop in stops]
+            for original in waypoints:
+                waypoint = json.loads(json.dumps(original))
+                waypoint["user_waypoint"] = True
+                waypoint.pop("fixed_endpoint", None)
+
+                completed_count = 0
+                for stop in ordered:
+                    if stop.get("historical") or self._route_stop_complete(stop):
+                        completed_count += 1
+                    else:
+                        break
+
+                first_index = completed_count
+                fixed_start_index = next((
+                    index for index, stop in enumerate(ordered)
+                    if stop.get("fixed_endpoint") == "start"
+                ), None)
+                if fixed_start_index is not None:
+                    first_index = max(first_index, fixed_start_index + 1)
+
+                fixed_end_index = next((
+                    index for index, stop in enumerate(ordered)
+                    if stop.get("fixed_endpoint") == "end"
+                ), None)
+                last_index = fixed_end_index if fixed_end_index is not None else len(ordered)
+                last_index = max(first_index, last_index)
+
+                waypoint_id = str(waypoint.get("location_id") or "")
+
+                def insertion_score(index: int) -> Tuple[int, float, int]:
+                    previous_id = str((ordered[index - 1] if index else {}).get("location_id") or "")
+                    next_id = str((ordered[index] if index < len(ordered) else {}).get("location_id") or "")
+                    unknown_legs = 0
+                    added_distance = 0.0
+                    for origin, destination in ((previous_id, waypoint_id), (waypoint_id, next_id)):
+                        if not origin or not destination:
+                            continue
+                        distance = distance_cache.distance(origin, destination)
+                        if distance is None:
+                            unknown_legs += 1
+                        else:
+                            added_distance += float(distance)
+                    if previous_id and next_id:
+                        replaced_distance = distance_cache.distance(previous_id, next_id)
+                        if replaced_distance is not None:
+                            added_distance -= float(replaced_distance)
+                    return unknown_legs, added_distance, index
+
+                insert_index = min(
+                    range(first_index, last_index + 1),
+                    key=insertion_score,
+                )
+                ordered.insert(insert_index, waypoint)
+            return ordered
+
+        def optimize_active_route(
+            self, selected_contracts: Sequence[str], scope: str = "all", force: bool = False,
+            fixed_start: str = "", fixed_end: str = "", history_plan: Optional[dict] = None,
+        ) -> dict:
+            with self.lock:
+                self.route_start = ""
+                self.route_capacity = 0.0
+                self.route_selected_contracts = [str(value).strip().casefold() for value in selected_contracts if str(value).strip()]
+                self.route_scope = str(scope or "all").lower()
+                if self.route_scope not in {"all", "selected"}:
+                    raise ValueError("Route scope must be all or selected.")
+                self.route_preset = self.route_scope
+                existing = self.route_workspaces.get(self.route_preset)
+                if not force and route_plan_can_be_reused(
+                    existing, self.operational_missions, self.route_scope, self.route_selected_contracts,
+                ):
+                    self.route_plan = existing
+                    self._save_route_settings()
+                    return self.route_plan
+                completed_history = []
+                history_source = history_plan if history_plan is not None else existing
+                if history_source and force:
+                    for old_stop in history_source.get("stops") or []:
+                        if self._route_stop_complete(old_stop):
+                            historical = json.loads(json.dumps(old_stop))
+                            historical["completion_state"] = "complete"
+                            historical["historical"] = True
+                            completed_history.append(historical)
+                        else:
+                            # Route history is a contiguous travelled prefix. A
+                            # later checkbox must not teleport that stop ahead
+                            # of the user's current position.
+                            break
+                self._save_route_settings()
+                selected = set(self.route_selected_contracts)
+                source_groups = [
+                    group for group in contract_groups(self.operational_missions)
+                    if group_active(group) and (
+                        self.route_scope == "all" or (group[0].mission_id or "").casefold() in selected
+                    )
+                ]
+                if not source_groups and not self.route_waypoints and not completed_history:
+                    self.route_plan = {
+                        "valid": False, "outdated": False, "stops": [],
+                        "error": "Select at least one active contract or add an extra location."
+                        if self.route_scope == "selected" else "No active contracts or extra locations are available to plan.",
+                        "warnings": [], "planning_mode": "open_distance", "scope": self.route_scope,
+                        "waypoints": self.route_waypoint_payloads(),
+                        "selected_contracts": list(self.route_selected_contracts),
+                    }
+                    self._store_active_route()
+                    return self.route_plan
+                catalog = self.location_catalog
+                unresolved = []
+                operations = []
+                operation_members = {}
+                operation_metadata = {}
+                for group in source_groups:
+                    aggregate_owner = next((mission for mission in group if mission.is_aggregate_load_plannable()), None)
+                    aggregate_total = float(str(aggregate_owner.scu).strip()) if aggregate_owner is not None else 0.0
+                    for index, mission in enumerate(group):
+                        pickup = catalog.resolve(mission.pickup)
+                        dropoff = catalog.resolve(mission.dropoff)
+                        if not pickup.resolved: unresolved.append(mission.pickup)
+                        if not dropoff.resolved: unresolved.append(mission.dropoff)
+                        if not pickup.record or not dropoff.record:
+                            continue
+                        quantity = float(mission.scu) if mission.has_known_scu() else 0.0
+                        op_id = route_operation_identity(mission, index)
+                        member_identity = logistics_member_identity(mission)
+                        checklist_id = hashlib.sha1(member_identity.encode("utf-8", errors="replace")).hexdigest()[:20]
+                        if mission.quantity_scope == "aggregate":
+                            checklist_id = hashlib.sha1(("aggregate-pickup\n" + member_identity).encode("utf-8", errors="replace")).hexdigest()[:20]
+                        operations.append(CargoOperation(
+                            op_id, mission.mission_id or mission.contract_uid, mission.commodity, quantity,
+                            pickup.record.id, dropoff.record.id, already_onboard=bool(self.checklist.get(checklist_id)),
+                        ))
+                        operation_members[op_id] = member_identity
+                        operation_metadata[op_id] = {
+                            "shared_quantity": aggregate_owner is not None and mission.quantity_scope == "aggregate",
+                            "shared_scu": format_scu(aggregate_total) if aggregate_owner is not None else "",
+                            "shared_scu_value": aggregate_total if aggregate_owner is not None else 0.0,
+                        }
+                if unresolved:
+                    unresolved = sorted({value for value in unresolved if value}, key=str.casefold)
+                    self.route_plan = {
+                        "valid": False, "outdated": False,
+                        "error": "Resolve or uncheck contracts with unknown locations before optimizing.",
+                        "warnings": ["Choose the real location for each OCR name below."],
+                        "unresolved_locations": unresolved, "stops": [],
+                        "planning_mode": "open_distance", "scope": self.route_scope,
+                        "waypoints": self.route_waypoint_payloads(),
+                        "selected_contracts": list(self.route_selected_contracts),
+                    }
+                    self._store_active_route()
+                    return self.route_plan
+                distance_cache = CachedDistanceProvider(
+                    app_data_directory() / "location-distance-cache.json", CatalogDistanceProvider(catalog),
+                )
+                progress_start = str((completed_history[-1] if completed_history else {}).get("location_id") or "")
+                plan = optimize_open_route(
+                    operations, distance_cache,
+                    required_locations=self.route_waypoints,
+                    fixed_start=str(fixed_start or progress_start), fixed_end=str(fixed_end or ""),
+                ) if operations or self.route_waypoints or fixed_start or fixed_end else RoutePlan(
+                    stops=[], exact=True, valid=True, warnings=[], error="", total_distance=0.0, input_hash="",
+                )
+                included_contract_ids = {
+                    str(value).casefold() for value in (existing or {}).get("included_contract_ids") or []
+                } | {
+                    (group[0].mission_id or "").casefold() for group in source_groups if group
+                }
+                included_groups = [
+                    group for group in contract_groups(self.missions)
+                    if group and (group[0].mission_id or "").casefold() in included_contract_ids
+                ]
+                payout_values = [group_payout(group) for group in included_groups]
+                known_payouts = [value for value in payout_values if value is not None]
+                checklist_ids_by_member = {}
+                for section in logistics_sections(self.operational_missions):
+                    for column in section.get("columns") or []:
+                        for item in column.get("items") or []:
+                            for member_identity in item.get("member_identities") or []:
+                                checklist_ids_by_member.setdefault(member_identity, []).append(item.get("id") or "")
+                stops = []
+                for number, stop in enumerate(plan.stops, 1):
+                    def operation_payload(op, role="pickup"):
+                        pickup_record = catalog.by_id.get(op.pickup)
+                        dropoff_record = catalog.by_id.get(op.dropoff)
+                        member_identity = operation_members.get(op.id, "")
+                        metadata = operation_metadata.get(op.id, {})
+                        shared_quantity = bool(metadata.get("shared_quantity"))
+                        shown_quantity = float(metadata.get("shared_scu_value") or 0) if shared_quantity and role == "delivery" else op.quantity
+                        return {
+                            "id": op.id, "contract_id": op.contract_id, "commodity": op.commodity,
+                            "member_identity": member_identity,
+                            "checklist_ids": [value for value in checklist_ids_by_member.get(member_identity, []) if value],
+                            "scu": format_scu(shown_quantity), "scu_value": shown_quantity,
+                            "shared_quantity": shared_quantity,
+                            "shared_scu": metadata.get("shared_scu") or "",
+                            "shared_scu_value": float(metadata.get("shared_scu_value") or 0),
+                            "pickup": pickup_record.name if pickup_record else op.pickup,
+                            "dropoff": dropoff_record.name if dropoff_record else op.dropoff,
+                        }
+                    stop_record = catalog.by_id.get(stop.location)
+                    pickup_payloads = [operation_payload(op, "pickup") for op in stop.pickups]
+                    delivery_payloads = []
+                    shared_deliveries = set()
+                    for op in stop.deliveries:
+                        payload = operation_payload(op, "delivery")
+                        if payload.get("shared_quantity"):
+                            shared_key = (str(payload.get("contract_id") or "").casefold(), str(payload.get("commodity") or "").casefold())
+                            if shared_key in shared_deliveries:
+                                continue
+                            shared_deliveries.add(shared_key)
+                        delivery_payloads.append(payload)
+                    stops.append({
+                        "number": number, "location": stop_record.name if stop_record else stop.location,
+                        "location_id": stop_record.id if stop_record else "",
+                        "parent_body": stop_record.subtitle if stop_record else "",
+                        "contracts": sorted({op.contract_id for op in [*stop.deliveries, *stop.pickups]}),
+                        "pickups": pickup_payloads,
+                        "deliveries": delivery_payloads,
+                        "load_before": stop.load_before, "load_after": stop.load_after,
+                        "distance_from_previous": stop.distance_from_previous,
+                        "cumulative_distance": stop.cumulative_distance,
+                        "warnings": stop.warnings, "completion_state": "pending",
+                        "user_waypoint": bool(stop.user_waypoint),
+                    })
+                if completed_history and stops:
+                    last_history_id = str(completed_history[-1].get("location_id") or "")
+                    first = stops[0]
+                    if str(first.get("location_id") or "") == last_history_id and not first.get("pickups") and not first.get("deliveries"):
+                        stops.pop(0)
+                stops, total_distance = self._recalculate_route_stops([*completed_history, *stops], distance_cache)
+                self.route_plan = {
+                    "valid": plan.valid, "outdated": False, "error": plan.error, "warnings": plan.warnings,
+                    "stops": stops, "exact": plan.exact, "result_kind": "exact" if plan.exact else "heuristic",
+                    "total_distance": total_distance, "input_hash": plan.input_hash,
+                    "distance_unit": "km",
+                    "contract_count": len(included_groups), "total_cargo": sum(op.quantity for op in operations),
+                    "expected_payout": sum(known_payouts),
+                    "known_payout_count": len(known_payouts),
+                    "unknown_payout_count": len(payout_values) - len(known_payouts),
+                    "planning_mode": "open_distance", "scope": self.route_scope,
+                    "waypoints": self.route_waypoint_payloads(),
+                    "selected_contracts": list(self.route_selected_contracts),
+                    "included_contract_ids": sorted(included_contract_ids),
+                }
+                self._store_active_route()
+                return self.route_plan
+
+        def resolve_route_location(self, captured_name: str, canonical_name: str) -> None:
+            captured_name = str(captured_name or "").strip()
+            canonical_name = str(canonical_name or "").strip()
+            if not captured_name or not canonical_name:
+                raise ValueError("Both the OCR name and real location are required.")
+            canonical_match = LOCATION_CATALOG.resolve(canonical_name)
+            if not canonical_match.record:
+                raise ValueError("Choose a location from the known-location list.")
+            with self.lock:
+                self.location_aliases[captured_name] = canonical_match.record.id
+                self.location_catalog = LOCATION_CATALOG.with_aliases(self.location_aliases)
+                self._save_location_aliases()
+                self._invalidate_route()
+                self.status = f"Mapped {captured_name} to {canonical_match.record.name}."
+
+        def invalidate_route_inputs(self, selected_contracts: Sequence[str], scope: str = "all") -> None:
+            with self.lock:
+                self.route_start = ""
+                self.route_capacity = 0.0
+                self.route_selected_contracts = [str(value).strip().casefold() for value in selected_contracts if str(value).strip()]
+                self.route_scope = str(scope or "all").lower()
+                if self.route_scope not in {"all", "selected"}:
+                    self.route_scope = "all"
+                self.route_preset = self.route_scope
+                self.route_plan = self.route_workspaces.get(self.route_preset)
+                self._save_route_settings()
+
+        def begin_custom_route(self) -> dict:
+            """Create a disposable edit draft from the currently active preset."""
+            with self.lock:
+                if self.route_preset == "custom_draft" and self.route_plan:
+                    return self.route_plan
+                source_preset = self.route_preset if self.route_preset in {"all", "selected", "custom"} else self.route_scope
+                source = self.route_plan or self.route_workspaces.get(source_preset)
+                if not source or not source.get("valid"):
+                    raise ValueError("Calculate an All active or Contracts route before editing it.")
+                custom = json.loads(json.dumps(source))
+                custom.update({
+                    "preset": "custom_draft", "custom": True, "editing": True,
+                    "confirmed": False, "dirty": False, "outdated": False,
+                    "source_preset": source_preset,
+                    "source_scope": source.get("scope") or self.route_scope,
+                    "source_selected_contracts": list(source.get("selected_contracts") or []),
+                    "fixed_start_id": str(source.get("fixed_start_id") or ""),
+                    "fixed_end_id": str(source.get("fixed_end_id") or ""),
+                })
+                self.route_preset = "custom_draft"
+                self.route_plan = custom
+                self._store_active_route()
+                return custom
+
+        def reorder_custom_route(self, stop_ids: Sequence[str]) -> dict:
+            """Apply a user order while keeping completed route history immutable."""
+            with self.lock:
+                if self.route_preset != "custom_draft" or not self.route_plan:
+                    raise ValueError("Open Edit mode before changing waypoint order.")
+                stops = list(self.route_plan.get("stops") or [])
+                by_id = {str(stop.get("stop_id") or self._route_stop_identity(stop)): stop for stop in stops}
+                requested = [str(value or "") for value in stop_ids if str(value or "")]
+                if len(requested) != len(stops) or set(requested) != set(by_id):
+                    raise ValueError("The edited route no longer matches the saved waypoints.")
+                completed_prefix = []
+                for stop in stops:
+                    if stop.get("historical") or self._route_stop_complete(stop):
+                        completed_prefix.append(str(stop.get("stop_id") or self._route_stop_identity(stop)))
+                    else:
+                        break
+                if requested[:len(completed_prefix)] != completed_prefix:
+                    raise ValueError("Completed waypoints stay fixed at the beginning of the route.")
+                ordered = [by_id[value] for value in requested]
+                pickup_positions = {}
+                delivery_positions = {}
+                for index, stop in enumerate(ordered):
+                    for operation in stop.get("pickups") or []:
+                        pickup_positions[str(operation.get("id") or "")] = index
+                    for operation in stop.get("deliveries") or []:
+                        delivery_positions[str(operation.get("id") or "")] = index
+                if any(pickup_positions.get(key, -1) > index for key, index in delivery_positions.items() if key in pickup_positions):
+                    raise ValueError("A delivery cannot be placed before its cargo pickup.")
+                distance_cache = CachedDistanceProvider(
+                    app_data_directory() / "location-distance-cache.json", CatalogDistanceProvider(self.location_catalog),
+                )
+                ordered, total_distance = self._recalculate_route_stops(ordered, distance_cache)
+                self.route_plan["stops"] = ordered
+                self.route_plan["total_distance"] = total_distance
+                self.route_plan["dirty"] = True
+                self.route_plan["outdated"] = False
+                self._store_active_route()
+                return self.route_plan
+
+        def set_custom_route_endpoint(self, endpoint: str, location: str) -> dict:
+            endpoint = str(endpoint or "").lower()
+            if endpoint not in {"start", "end"}:
+                raise ValueError("Route endpoint must be start or end.")
+            match = self.location_catalog.resolve(location)
+            if not match.record:
+                raise ValueError("Choose a known location for the route endpoint.")
+            with self.lock:
+                if self.route_preset != "custom_draft" or not self.route_plan:
+                    raise ValueError("Open Edit mode before setting route endpoints.")
+                stops = list(self.route_plan.get("stops") or [])
+                promotion_index = route_endpoint_promotion_index(stops, match.record.id, endpoint)
+                target = stops[promotion_index] if promotion_index is not None and not self._route_stop_complete(
+                    stops[promotion_index]
+                ) else next((
+                    stop for stop in stops
+                    if stop.get("fixed_endpoint") == endpoint
+                    and stop.get("location_id") == match.record.id
+                ), None)
+                if target is None:
+                    target = next((
+                        stop for stop in stops
+                        if str(stop.get("location_id") or "") == match.record.id
+                        and stop.get("user_waypoint")
+                        and not stop.get("pickups") and not stop.get("deliveries")
+                    ), None)
+                # Drop superseded empty endpoint anchors, including duplicates
+                # left by older builds when a cargo stop shared their location.
+                stops = [
+                    stop for stop in stops
+                    if stop is target or not (
+                        stop.get("fixed_endpoint") == endpoint
+                        and not stop.get("pickups") and not stop.get("deliveries")
+                    )
+                ]
+                for stop in stops:
+                    if stop.get("fixed_endpoint") == endpoint:
+                        stop.pop("fixed_endpoint", None)
+                if target is None:
+                    target = {
+                        "location": match.record.name, "location_id": match.record.id,
+                        "parent_body": match.record.subtitle, "contracts": [], "pickups": [], "deliveries": [],
+                        "warnings": [], "completion_state": "pending", "user_waypoint": True,
+                        "waypoint_uid": hashlib.sha1(
+                            f"{time.time_ns()}:{endpoint}:{match.record.id}:{len(stops)}".encode("utf-8")
+                        ).hexdigest()[:16],
+                    }
+                    stops.append(target)
+                stops.remove(target)
+                if endpoint == "start":
+                    completed_count = 0
+                    for stop in stops:
+                        if stop.get("historical") or self._route_stop_complete(stop): completed_count += 1
+                        else: break
+                    stops.insert(completed_count, target)
+                    self.route_plan["fixed_start_id"] = match.record.id
+                else:
+                    stops.append(target)
+                    self.route_plan["fixed_end_id"] = match.record.id
+                target["fixed_endpoint"] = endpoint
+                distance_cache = CachedDistanceProvider(
+                    app_data_directory() / "location-distance-cache.json", CatalogDistanceProvider(self.location_catalog),
+                )
+                stops, total_distance = self._recalculate_route_stops(stops, distance_cache)
+                self.route_plan["stops"] = stops
+                self.route_plan["total_distance"] = total_distance
+                self.route_plan["dirty"] = True
+                self._store_active_route()
+                return self.route_plan
+
+        def reoptimize_custom_route(self) -> dict:
+            """Rebuild unfinished work while preserving history and manual anchors."""
+            with self.lock:
+                custom = self.route_workspaces.get("custom_draft")
+                if not custom:
+                    raise ValueError("Open Edit mode before reoptimizing the route.")
+                # Reoptimization temporarily builds the source preset before it
+                # reconstructs the custom workspace.  Keep a complete snapshot
+                # so a bad anchor (or any later failure) cannot leave the user
+                # with the newly generated source route and lost custom stops.
+                original_custom = json.loads(json.dumps(custom))
+                original_route_plan = json.loads(json.dumps(self.route_plan)) if self.route_plan else None
+                original_workspaces = json.loads(json.dumps(self.route_workspaces))
+                original_preset = self.route_preset
+                original_scope = self.route_scope
+                original_selected = list(self.route_selected_contracts)
+                original_start = self.route_start
+                original_capacity = self.route_capacity
+                source_scope = str(custom.get("source_scope") or custom.get("scope") or "all")
+                source_selected = list(custom.get("source_selected_contracts") or custom.get("selected_contracts") or [])
+                fixed_start = str(custom.get("fixed_start_id") or "")
+                fixed_end = str(custom.get("fixed_end_id") or "")
+                manual_waypoints = [
+                    json.loads(json.dumps(stop)) for stop in custom.get("stops") or []
+                    if stop.get("user_waypoint") and not stop.get("fixed_endpoint")
+                ]
+                saved_source = json.loads(json.dumps(self.route_workspaces.get(source_scope))) if self.route_workspaces.get(source_scope) else None
+                start_stop = next((
+                    stop for stop in custom.get("stops") or []
+                    if stop.get("fixed_endpoint") == "start"
+                ), None)
+                end_stop = next((
+                    stop for stop in custom.get("stops") or []
+                    if stop.get("fixed_endpoint") == "end"
+                ), None)
+                pending_start = fixed_start if fixed_start and not (
+                    start_stop and (start_stop.get("historical") or self._route_stop_complete(start_stop))
+                ) else ""
+                pending_end = fixed_end if fixed_end and not (
+                    end_stop and (end_stop.get("historical") or self._route_stop_complete(end_stop))
+                ) else ""
+                try:
+                    generated = json.loads(json.dumps(self.optimize_active_route(
+                        source_selected, source_scope, force=True,
+                        fixed_start=pending_start, fixed_end=pending_end, history_plan=custom,
+                    )))
+                    if not generated.get("valid"):
+                        raise ValueError(generated.get("error") or "The custom route could not be reoptimized.")
+                    if saved_source is None:
+                        self.route_workspaces.pop(source_scope, None)
+                    else:
+                        self.route_workspaces[source_scope] = saved_source
+                    generated.update({
+                        "preset": "custom_draft", "custom": True, "editing": True,
+                        "confirmed": False, "dirty": True,
+                        "source_preset": custom.get("source_preset") or "all",
+                        "source_scope": source_scope, "source_selected_contracts": source_selected,
+                        "fixed_start_id": fixed_start, "fixed_end_id": fixed_end,
+                    })
+                    self.route_preset = "custom_draft"
+                    self.route_plan = generated
+                    self.route_workspaces["custom_draft"] = generated
+                    for endpoint, location_id, pending in (
+                        ("start", fixed_start, pending_start), ("end", fixed_end, pending_end),
+                    ):
+                        if not location_id or pending:
+                            continue
+                        completed_target = next((
+                            stop for stop in self.route_plan.get("stops") or []
+                            if str(stop.get("location_id") or "") == location_id
+                            and (stop.get("historical") or self._route_stop_complete(stop))
+                        ), None)
+                        if completed_target is not None:
+                            completed_target["fixed_endpoint"] = endpoint
+                    if pending_start:
+                        record = self.location_catalog.by_id.get(fixed_start)
+                        if record:
+                            # The endpoint setter resolves catalog names and
+                            # aliases. Internal record IDs are deliberately not
+                            # user-facing lookup values.
+                            self.set_custom_route_endpoint("start", record.name)
+                    if pending_end:
+                        record = self.location_catalog.by_id.get(fixed_end)
+                        if record:
+                            self.set_custom_route_endpoint("end", record.name)
+                    if manual_waypoints:
+                        distance_cache = CachedDistanceProvider(
+                            app_data_directory() / "location-distance-cache.json",
+                            CatalogDistanceProvider(self.location_catalog),
+                        )
+                        stops = self._insert_custom_waypoints_optimally(
+                            self.route_plan.get("stops") or [], manual_waypoints, distance_cache,
+                        )
+                        stops, total_distance = self._recalculate_route_stops(stops, distance_cache)
+                        self.route_plan["stops"] = stops
+                        self.route_plan["total_distance"] = total_distance
+                    self.route_plan["dirty"] = True
+                    self.route_plan["outdated"] = False
+                    self._store_active_route()
+                    return self.route_plan
+                except Exception:
+                    self.route_workspaces = original_workspaces
+                    self.route_workspaces["custom_draft"] = original_custom
+                    self.route_plan = original_route_plan
+                    self.route_preset = original_preset
+                    self.route_scope = original_scope
+                    self.route_selected_contracts = original_selected
+                    self.route_start = original_start
+                    self.route_capacity = original_capacity
+                    self._save_route_settings()
+                    raise
+
+        def add_custom_route_waypoint(self, location: str, after_stop_id: str = "") -> dict:
+            match = self.location_catalog.resolve(location)
+            if not match.record:
+                raise ValueError("Choose a known location to add as a waypoint.")
+            with self.lock:
+                if self.route_preset != "custom_draft" or not self.route_plan:
+                    raise ValueError("Open Edit mode before adding a waypoint.")
+                stops = list(self.route_plan.get("stops") or [])
+                waypoint = {
+                    "location": match.record.name, "location_id": match.record.id,
+                    "parent_body": match.record.subtitle, "contracts": [], "pickups": [], "deliveries": [],
+                    "warnings": [], "completion_state": "pending", "user_waypoint": True,
+                    "waypoint_uid": hashlib.sha1(
+                        f"{time.time_ns()}:{match.record.id}:{len(stops)}".encode("utf-8")
+                    ).hexdigest()[:16],
+                }
+                completed_prefix_count = 0
+                for stop in stops:
+                    if self._route_stop_complete(stop):
+                        completed_prefix_count += 1
+                    else:
+                        break
+                requested_after = str(after_stop_id or "")
+                if requested_after:
+                    source_index = next(
+                        (index for index, stop in enumerate(stops) if str(stop.get("stop_id") or "") == requested_after),
+                        None,
+                    )
+                    if source_index is None:
+                        raise ValueError("The selected route position no longer exists.")
+                    insert_index = source_index + 1
+                    if insert_index < completed_prefix_count:
+                        raise ValueError("Completed route history cannot be split by a new waypoint.")
+                else:
+                    end_id = str(self.route_plan.get("fixed_end_id") or "")
+                    insert_index = next(
+                        (index for index, stop in enumerate(stops) if stop.get("location_id") == end_id),
+                        len(stops),
+                    )
+                    insert_index = max(insert_index, completed_prefix_count)
+                stops.insert(insert_index, waypoint)
+                distance_cache = CachedDistanceProvider(
+                    app_data_directory() / "location-distance-cache.json", CatalogDistanceProvider(self.location_catalog),
+                )
+                stops, total_distance = self._recalculate_route_stops(stops, distance_cache)
+                self.route_plan["stops"] = stops
+                self.route_plan["total_distance"] = total_distance
+                self.route_plan["dirty"] = True
+                self._store_active_route()
+                return self.route_plan
+
+        def remove_custom_route_stop(self, stop_id: str) -> dict:
+            """Remove an unfinished stop from the current edit draft."""
+            stop_id = str(stop_id or "").strip()
+            with self.lock:
+                if self.route_preset != "custom_draft" or not self.route_plan:
+                    raise ValueError("Open Edit mode before removing a waypoint.")
+                stops = list(self.route_plan.get("stops") or [])
+                target = next((stop for stop in stops if str(stop.get("stop_id") or "") == stop_id), None)
+                if target is None:
+                    raise ValueError("The selected waypoint no longer exists.")
+                if target.get("historical") or self._route_stop_complete(target):
+                    raise ValueError("Completed route history cannot be removed.")
+                if len(stops) <= 1:
+                    raise ValueError("A route must contain at least one waypoint.")
+                stops.remove(target)
+                endpoint = str(target.get("fixed_endpoint") or "")
+                if endpoint == "start":
+                    self.route_plan["fixed_start_id"] = ""
+                elif endpoint == "end":
+                    self.route_plan["fixed_end_id"] = ""
+                distance_cache = CachedDistanceProvider(
+                    app_data_directory() / "location-distance-cache.json", CatalogDistanceProvider(self.location_catalog),
+                )
+                stops, total_distance = self._recalculate_route_stops(stops, distance_cache)
+                self.route_plan["stops"] = stops
+                self.route_plan["total_distance"] = total_distance
+                self.route_plan["dirty"] = True
+                self.route_plan["outdated"] = False
+                self._store_active_route()
+                return self.route_plan
+
+        def confirm_custom_route(self) -> dict:
+            """Freeze the current edit draft as the persistent Custom preset."""
+            with self.lock:
+                if self.route_preset != "custom_draft" or not self.route_plan:
+                    raise ValueError("Open Edit mode before confirming a custom route.")
+                if not self.route_plan.get("dirty"):
+                    raise ValueError("Make a route change before confirming the Custom preset.")
+                confirmed = json.loads(json.dumps(self.route_plan))
+                confirmed.update({
+                    "preset": "custom", "custom": True, "editing": False,
+                    "confirmed": True, "dirty": False, "outdated": False,
+                })
+                self.route_workspaces["custom"] = confirmed
+                self.route_workspaces.pop("custom_draft", None)
+                self.route_preset = "custom"
+                self.route_plan = confirmed
+                self.route_selected_contracts = [
+                    str(value).casefold() for value in confirmed.get("selected_contracts") or []
+                ]
+                self._save_route_settings()
+                return confirmed
 
         def _save_ocr_settings(self) -> None:
             _write_json_object(self.ocr_settings_path, {
@@ -7738,7 +9527,6 @@ def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1"
                     for m in group if m.scu_provenance == "exact_log" and m.has_known_scu()
                 }
                 objectives = []
-                all_exact = bool(group) and all(m.scu_provenance == "exact_log" and m.has_known_scu() for m in group)
                 unique_pickups = {ocr_compact(m.pickup) for m in group if m.pickup and not m.pickup.lower().startswith("unknown")}
                 unique_dropoffs = {ocr_compact(m.dropoff) for m in group if m.dropoff and not m.dropoff.lower().startswith("unknown")}
                 parsed_aggregate = any(str(item.get("quantity_scope") or "").lower() == "aggregate" for item in parsed_rows)
@@ -7748,6 +9536,7 @@ def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1"
                         row = dict(item)
                         row["provenance"] = "exact_log" if _objective_signature(item) in exact_signatures else "ocr"
                         row["quantity_scope"] = "aggregate"
+                        row["primary_pickup_occurrences"] = list(parsed.get("primary_pickup_occurrences") or [])
                         objectives.append(row)
                 elif aggregate_shape:
                     parsed_item = parsed_rows[0]
@@ -7761,8 +9550,9 @@ def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1"
                             "scu": mission.scu if existing_known else (parsed_item.get("scu") if index == 0 else ""),
                             "provenance": "exact_log" if existing_known or parsed_signature in exact_signatures else ("ocr" if index == 0 else mission.data_provenance),
                             "quantity_scope": "aggregate",
+                            "primary_pickup_occurrences": list(parsed.get("primary_pickup_occurrences") or []),
                         })
-                elif not all_exact:
+                else:
                     for item in parsed_rows:
                         row = dict(item)
                         row["provenance"] = "exact_log" if _objective_signature(item) in exact_signatures else "ocr"
@@ -7783,7 +9573,8 @@ def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1"
                         )
                         return
                     self.save_contract_override(
-                        mission_id, parsed.get("payout"), objectives, parsed.get("contracted_by") or "", source="ocr"
+                        mission_id, parsed.get("payout"), objectives,
+                        parsed.get("contracted_by") or "", source="ocr", validated=True,
                     )
                     missing = []
                     if parsed.get("payout") is None:
@@ -7840,9 +9631,11 @@ def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1"
             with self.lock:
                 self.deleted_contract_ids.add(mission_id)
                 self.contract_overrides.pop(mission_id, None)
+                self.location_overrides.get("contracts", {}).pop(mission_id, None)
                 self.events = [event for event in self.events if (event.mission_id or "").lower() != mission_id]
                 self._save_deleted_contracts()
                 self._save_contract_overrides()
+                self._save_location_overrides()
                 self._refresh_contract_overrides()
                 self.status = "Contract deleted."
 
@@ -7977,6 +9770,17 @@ def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1"
                 self._save_checklist()
                 self.contract_overrides = {}
                 self._save_contract_overrides()
+                self.location_overrides = {"version": 1, "contracts": {}}
+                self._save_location_overrides()
+                self.operational_missions = []
+                self.operational_notices = {}
+                self.route_plan = None
+                self.route_workspaces = {}
+                self.route_scope = "all"
+                self.route_preset = "all"
+                self.route_selected_contracts = []
+                self.route_waypoints = []
+                self._save_route_settings()
                 self.deleted_contract_ids = set()
                 self._save_deleted_contracts()
                 self.session_started = time.time()
@@ -8106,8 +9910,10 @@ def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1"
 
         def to_state(self) -> dict:
             with self.lock:
+                display_catalog = self.location_catalog
                 apply_completion_events(self.missions, self.events)
                 self.missions = merge_missions(self.missions)
+                self.operational_missions, self.operational_notices = operational_contracts(self.missions, self.location_overrides)
                 session_elapsed_override = self.session_timer_elapsed()
                 accepted, completed, total, mission_elapsed, mission_profit_hr, session_elapsed, session_profit_hr = session_stats(
                     self.missions, self.session_started, session_elapsed_override=session_elapsed_override
@@ -8115,12 +9921,17 @@ def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1"
                 rows = []
                 groups_payload = []
                 now_epoch = time.time()
-                for group_index, group in enumerate(contract_groups(self.missions)):
-                    if not group:
+                operational_by_id = {
+                    (group[0].mission_id or "").casefold(): group for group in contract_groups(self.operational_missions) if group
+                }
+                for group_index, raw_group in enumerate(contract_groups(self.missions)):
+                    if not raw_group:
                         continue
-                    first = group[0]
-                    status = "COMPLETED" if group_completed(group) else ("ABANDONED" if group_abandoned(group) else "ACCEPTED")
-                    payout_known = group_payout(group)
+                    first = raw_group[0]
+                    mission_key = (first.mission_id or "").casefold()
+                    group = operational_by_id.get(mission_key, raw_group)
+                    status = "COMPLETED" if group_completed(raw_group) else ("ABANDONED" if group_abandoned(raw_group) else "ACCEPTED")
+                    payout_known = group_payout(raw_group)
                     payout_value = payout_known or 0
                     start_epoch = group_start_epoch(group)
                     end_epoch = group_completed_epoch(group) if status in ("COMPLETED", "ABANDONED") else now_epoch
@@ -8130,11 +9941,18 @@ def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1"
                         objective = {
                             "pickup": mission.pickup,
                             "dropoff": mission.dropoff,
+                            "pickup_info": normalized_location_payload(mission.pickup, display_catalog),
+                            "dropoff_info": normalized_location_payload(mission.dropoff, display_catalog),
                             "commodity": mission.commodity,
                             "scu": mission.scu,
                             "provenance": mission.data_provenance,
                             "scu_provenance": mission.scu_provenance,
                             "quantity_scope": mission.quantity_scope,
+                            "pickup_source_section": mission.pickup_source_section,
+                            "pickup_source_order": mission.pickup_source_order,
+                            "pickup_raw_text": mission.pickup_raw_text,
+                            "pickup_parent": mission.pickup_parent,
+                            "primary_pickup_occurrences": list(mission.primary_pickup_occurrences),
                         }
                         objectives.append(objective)
                         row = mission.rows()[0]
@@ -8143,12 +9961,25 @@ def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1"
                         row["Payout"] = format_auec(payout_known) if payout_known is not None else "Unknown"
                         row["Duration"] = format_duration(duration_seconds) if start_epoch is not None else ""
                         rows.append(row)
-                    aggregate_owner = next((mission for mission in group if mission.is_aggregate_load_plannable()), None)
+                    original_objectives = [{
+                        "location_id": contract_location_id(mission, "pickup", mission.pickup_source_order),
+                        "role": "pickup", "canonical_location": normalized_location_payload(mission.pickup, display_catalog)["name"],
+                        "pickup": mission.pickup, "dropoff": mission.dropoff, "commodity": mission.commodity,
+                        "pickup_info": normalized_location_payload(mission.pickup, display_catalog),
+                        "dropoff_info": normalized_location_payload(mission.dropoff, display_catalog),
+                        "scu": mission.scu, "quantity_scope": mission.quantity_scope,
+                        "source_section": mission.pickup_source_section, "source_order": mission.pickup_source_order,
+                        "raw_text": mission.pickup_raw_text, "parent": mission.pickup_parent,
+                    } for mission in raw_group]
+                    aggregate_owner = next((mission for mission in raw_group if mission.is_aggregate_load_plannable()), None)
+                    assessment = multi_pickup_bug_assessment(raw_group)
+                    bug_config = self.location_overrides.get("contracts", {}).get(mission_key, {"mode": "disabled"})
+                    notice = self.operational_notices.get(mission_key, {})
                     groups_payload.append({
                         "id": group_index,
                         "mission_id": first.mission_id,
-                        "needs_review": any(mission.is_placeholder() for mission in group),
-                        "aggregate_quantity": aggregate_owner is not None and len(group) > 1,
+                        "needs_review": any(mission.is_placeholder() for mission in raw_group) or bool(assessment.get("warning")),
+                        "aggregate_quantity": aggregate_owner is not None and len(raw_group) > 1,
                         "aggregate_scu": aggregate_owner.scu if aggregate_owner is not None else "",
                         "status": status,
                         "payout": format_auec(payout_known) if payout_known is not None else "",
@@ -8165,21 +9996,47 @@ def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1"
                         "completed_at": first.completed_timestamp,
                         "accepted_epoch": start_epoch or 0,
                         "objectives": objectives,
+                        "original_objectives": original_objectives,
+                        "bug_fix": {
+                            "enabled": bug_config.get("mode") == "enabled",
+                            "eligible": bool(assessment.get("matches_shape")),
+                            "details_order_confident": bool(assessment.get("confident")),
+                            "warning": notice.get("warning") or assessment.get("warning") or "",
+                            "hidden_count": int(notice.get("hidden_count") or 0),
+                            "selected_pickup": notice.get("selected_pickup") or bug_config.get("selected_pickup_name") or "",
+                        },
                     })
-                logistics_groups = logistics_sections(self.missions)
+                logistics_groups = logistics_sections(self.operational_missions)
+                for section in logistics_groups:
+                    section["fixed_location_info"] = normalized_location_payload(section.get("fixed_location") or "", display_catalog)
+                    for column in section.get("columns") or []:
+                        column["location_info"] = normalized_location_payload(column.get("location") or "", display_catalog)
                 active_objective_count = sum(section.get("objective_count", 0) for section in logistics_groups)
-                quantity_summary = active_quantity_summary(self.missions)
+                quantity_summary = active_quantity_summary(self.operational_missions)
                 # Keep checklist persistence independent from the initial empty
                 # dashboard state. The UI ignores ids that are not present in the
                 # current active objectives, while newly loaded objectives retain
                 # their checked state across dashboard/overlay process refreshes.
                 checklist_snapshot = dict(self.checklist)
+                loaded_member_identities = loaded_logistics_member_identities(logistics_groups, checklist_snapshot)
                 timer_label = {
                     "running": "RUNNING",
                     "paused": "PAUSED",
                     "stopped": "STOPPED",
                     "armed_first": "WAITING",
                 }.get(self.timer_state, self.timer_state.upper())
+                route_payload = json.loads(json.dumps(self.route_plan)) if self.route_plan else {
+                    "valid": False, "outdated": False, "stops": [], "error": "No route calculated.",
+                    "planning_mode": "open_distance",
+                    "scope": self.route_scope, "waypoints": self.route_waypoint_payloads(),
+                    "selected_contracts": list(self.route_selected_contracts),
+                    "preset": self.route_preset,
+                }
+                route_payload["preset"] = self.route_preset
+                route_payload["editing"] = self.route_preset == "custom_draft"
+                route_payload["custom_available"] = bool(
+                    self.route_workspaces.get("custom") and self.route_workspaces["custom"].get("valid")
+                )
                 return {
                     "app": APP_NAME,
                     "version": APP_VERSION,
@@ -8209,6 +10066,13 @@ def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1"
                         "quantity_summary": quantity_summary,
                     },
                     "checklist": checklist_snapshot,
+                    "loaded_member_identities": loaded_member_identities,
+                    "workarounds": {"multi_pickup_bug_default": bool(self.multi_pickup_bug_default)},
+                    "location_suggestions": [
+                        record.name for record in display_catalog.records
+                        if record.qt_valid and not record.name.lower().endswith(" clinic")
+                    ],
+                    "route": route_payload,
                     "ocr": {
                         "auto_enabled": bool(self.auto_ocr_enabled),
                         "pending": len(self.ocr_pending_ids),
@@ -8255,7 +10119,7 @@ def run_web_dashboard(default_log: Optional[str] = None, host: str = "127.0.0.1"
   --bg:#07070c;--surface:#14141e;--surface2:#1b1a27;--surface3:#222033;
   --line:#2a293d;--line2:#3a3653;--purple:#7c63ff;--purple2:#a78cff;
   --cyan:#55d9ff;--blue:#5aa7ff;--green:#49eda0;--red:#ff6476;--amber:#ffc24d;
-  --text:#f4f5ff;--soft:#c2c6df;--muted:#858aa3;--shadow:rgba(0,0,0,.48);--radius:15px;
+  --text:#f4f5ff;--soft:#c2c6df;--muted:#858aa3;--shadow:rgba(0,0,0,.48);--radius:11px;
   --type-meta:9px;--type-ui:10px;--type-control:10.5px;--type-heading:12px;--weight-body:700;--weight-control:700;--weight-strong:900;
 }
 *{box-sizing:border-box;scrollbar-width:thin;scrollbar-color:#4c4768 #0b0b12}
@@ -8284,8 +10148,9 @@ button,input,select{font:inherit}
 .content-panel{display:grid;grid-template-rows:52px minmax(0,1fr) 14px;height:var(--contract-log-height,398px);min-height:280px;max-height:min(760px,calc(100vh - 300px))}.contract-resizer,.logistics-resizer{position:relative;height:14px;z-index:12;cursor:ns-resize;touch-action:none;background:#151520;border-top:1px solid rgba(154,147,203,.30);box-shadow:inset 0 1px 0 rgba(255,255,255,.035)}.contract-resizer:after,.logistics-resizer:after{content:"";position:absolute;left:50%;top:6px;width:46px;height:2px;border-radius:99px;background:rgba(154,147,203,.58);transform:translateX(-50%);transition:background .15s}.contract-resizer:hover:after,.contract-resizer.active:after,.logistics-resizer:hover:after,.logistics-resizer.active:after{background:rgba(90,167,255,.82)}.resizing-contract-log,.resizing-logistics-board{cursor:ns-resize!important;user-select:none!important}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:11px;padding:0 14px;border-bottom:1px solid var(--line);min-width:0}.title-row{display:flex;align-items:baseline;gap:10px;min-width:0}.title-row h2{font-size:14px;margin:0;font-weight:950;white-space:nowrap}.title-row small{color:var(--muted);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tools{display:flex;align-items:center;gap:7px;min-width:0}.filterbar{display:flex;align-items:center;gap:5px;min-width:max-content}.filter-btn{height:27px;border:1px solid rgba(154,147,203,.18);border-radius:7px;background:#101018;color:#aeb4ce;padding:0 9px;font-size:var(--type-control);font-weight:var(--weight-control);line-height:1;text-transform:none;letter-spacing:.01em;cursor:pointer}.search,.select{height:32px;border:1px solid var(--line);border-radius:8px;background:#101018;color:#d9dcf3;padding:0 10px;font-size:10px;min-width:0;outline:0}.search:focus,.select:focus{border-color:rgba(124,99,255,.70);box-shadow:0 0 0 3px rgba(124,99,255,.09)}.search{width:min(235px,21vw)}.select{width:145px}
 .table-wrap{min-height:0;overflow-y:auto;overflow-x:hidden;padding:0;background:transparent;scrollbar-color:#3b3756 #0b0b12}.table{width:100%;min-width:0;border-collapse:separate;border-spacing:0;table-layout:fixed;background:transparent}.table th{position:sticky;top:0;z-index:3;height:44px;background:#12121d;color:#969bb5;text-transform:uppercase;font-size:8.7px;letter-spacing:.72px;border-bottom:1px solid #343149;text-align:left;padding:0 8px;box-shadow:0 6px 14px rgba(0,0,0,.16)}.table th:first-child,.table th:last-child{border-radius:0}.table th:nth-child(5){text-align:center}.table tbody,.table tbody tr,.table tbody td{background:none!important;background-image:none!important}.table tbody tr{--contract-accent:#858aa3}.table tbody tr.accepted{--contract-accent:var(--blue)}.table tbody tr.completed{--contract-accent:var(--green)}.table tbody tr.abandoned{--contract-accent:var(--red)}.table td{height:45px;padding:8px;color:#cfd3e7;font-size:10.8px;line-height:1.22;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid rgba(255,255,255,.04)}.table tr.group-start td{border-top:1px solid rgba(255,255,255,.105)}.table tr.group-end td{border-bottom:1px solid rgba(255,255,255,.105)}.table td.contract-cell{vertical-align:middle;color:var(--contract-accent);box-shadow:none}.table td.status-cell{position:relative;padding-left:14px;padding-right:8px;border-left:3px solid var(--contract-accent);border-radius:0}.table td.rank-cell{border-radius:0}.table td.location-cell{font-weight:650;color:#d8dced}.table td.dropoff-cell{color:#eceeff}.route-location{display:flex;align-items:center;gap:7px;min-width:0}.route-icon{display:block;width:10px;height:10px;flex:0 0 10px;fill:currentColor;opacity:.92}.pickup-route .route-icon{color:#6f9bd1}.dropoff-route .route-icon{color:#8979d8}.location-text{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis}.commodity-cell{color:#e0e3f5}.commodity-chip{--commodity-color:#8b90a5;display:inline-flex;align-items:center;gap:5px;max-width:100%;padding:4px 6px;border:1px solid color-mix(in srgb,var(--commodity-color) 20%,rgba(255,255,255,.035));border-radius:8px;background:color-mix(in srgb,var(--commodity-color) 7%,rgba(255,255,255,.012));font-weight:720;overflow:hidden;text-overflow:ellipsis}.commodity-chip .cargo-icon{width:12px;height:12px;flex:0 0 12px;fill:var(--commodity-color);color:var(--commodity-color);filter:none}.commodity-name{display:block;overflow:hidden;text-overflow:ellipsis}.scu-cell{text-align:center}.scu-stack{display:inline-flex;align-items:baseline;justify-content:center;gap:4px;min-width:40px;padding:4px 5px;white-space:nowrap;border-radius:7px;background:rgba(124,99,255,.075);border:1px solid rgba(124,99,255,.14)}.scu-stack strong{font:850 10.8px Consolas,monospace;color:#ece9ff}.scu-stack small{font-size:7px;line-height:1;color:#817ba5;font-weight:900;letter-spacing:.35px}.shared-scu-stack{flex-direction:column;align-items:center;gap:2px;line-height:1.05}.shared-scu-stack strong{white-space:nowrap}.shared-scu-stack small{display:block}.status-pill{display:inline-flex;align-items:center;gap:7px;min-width:0;color:var(--contract-accent)}.status-icon{width:27px;height:27px;padding:5px;display:inline-grid;place-items:center;flex:0 0 27px;border-radius:8px;background:color-mix(in srgb,var(--contract-accent) 9%,rgba(255,255,255,.015));border:1px solid color-mix(in srgb,var(--contract-accent) 22%,transparent);filter:none}.status-icon svg{display:block;width:100%;height:100%;fill:currentColor}.status-copy{display:grid;gap:4px;min-width:0}.status-line{display:flex;align-items:center;gap:4px;min-width:0;line-height:1}.status-line strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10.4px;letter-spacing:.22px;line-height:1;font-weight:920}.status-copy small{font-size:8.2px;color:#858aa3;line-height:1.1;font-weight:680}.metric-cell{text-align:left}.metric-card{display:inline-grid;gap:3px;width:100%;max-width:74px;min-width:0;box-sizing:border-box;padding:6px;border-radius:8px;background:color-mix(in srgb,var(--contract-accent) 5%,rgba(255,255,255,.012));border:1px solid color-mix(in srgb,var(--contract-accent) 11%,transparent)}.metric-main{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:900;color:var(--contract-accent);font-size:10.8px}.metric-unit{display:block;color:#777d95;font-size:7.3px;text-transform:uppercase;letter-spacing:.55px;font-weight:850}.duration-value{font:850 10.2px Consolas,monospace;color:var(--contract-accent)}.rank-chip{display:inline-flex;align-items:center;max-width:100%;min-height:23px;padding:0 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-radius:7px;border:1px solid color-mix(in srgb,var(--contract-accent) 18%,transparent);background:color-mix(in srgb,var(--contract-accent) 6%,transparent);color:var(--contract-accent);font-size:9.2px;font-weight:820}.contract-actions{display:inline-flex;align-items:center;justify-content:flex-start;gap:3px;flex:0 0 auto}.contract-action{width:16px;height:16px;padding:0;display:inline-grid;place-items:center;border:0;border-radius:0;background:transparent;color:#8990aa;cursor:pointer;opacity:.78;line-height:0;transition:color .14s,opacity .14s,transform .14s}.contract-action svg{display:block;width:12px;height:12px;fill:currentColor;pointer-events:none}.contract-action:hover{opacity:1;transform:translateY(-.5px)}.contract-action:focus-visible{outline:1px solid currentColor;outline-offset:2px;border-radius:2px}.contract-action.edit:hover{background:transparent;color:var(--blue)}.contract-action.delete:hover{background:transparent;color:var(--red)}.contract-action.review{color:var(--amber);opacity:.95;background:transparent}.empty-value{color:#5e6379}.empty-row td{text-align:center!important;color:var(--muted)!important;height:150px!important;background:none!important;border:0!important}
 .logistics{display:grid;grid-template-rows:48px 36px minmax(0,1fr) 14px;height:var(--logistics-height,260px);min-height:212px;max-height:min(620px,calc(100vh - 260px))}.checklist-tools{display:flex;align-items:center;gap:8px;min-width:0}.checklist-summary{display:flex;align-items:baseline;gap:7px;white-space:nowrap}.checklist-summary strong{color:var(--blue);font-size:10px;font-weight:950}.checklist-summary small{color:var(--muted);font-size:8.5px;font-weight:800;text-transform:uppercase;letter-spacing:.35px}.checklist-summary.complete strong,.checklist-summary.complete small{color:var(--green)}.checklist-reset,.overlay-open{height:28px;border:1px solid var(--line);border-radius:8px;background:#11111a;color:#aeb3cc;padding:0 10px;font-size:var(--type-control);font-weight:var(--weight-control);line-height:1;letter-spacing:.01em;text-transform:none;cursor:pointer}.checklist-reset:hover:not(:disabled),.overlay-open:hover:not(:disabled){border-color:rgba(124,99,255,.68);color:#fff}.checklist-reset:disabled,.overlay-open:disabled{opacity:.38;cursor:not-allowed}.next-action{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:0 14px;border-bottom:1px solid rgba(255,255,255,.055);background:rgba(11,12,18,.48);color:#aeb4cc;font-size:10px;min-width:0}.next-action strong{color:#dfe6fb;font-weight:900}.next-action span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.next-action.complete strong{color:var(--green)}.logistics-groups{display:grid;gap:13px;padding:11px 13px 13px;min-width:0;min-height:0;overflow:auto;scrollbar-color:#3b3756 #0b0b12}.logistics-group{display:grid;grid-template-columns:180px minmax(0,1fr);gap:11px;min-width:0}.logistics-group+.logistics-group{border-top:1px solid rgba(255,255,255,.055);padding-top:13px}.pickup-card{border:1px solid var(--line);border-radius:12px;background:linear-gradient(180deg,#1d1e2b,#14141e);padding:14px;min-height:144px;display:flex;flex-direction:column}.pickup-card>small{font-size:8.5px;text-transform:uppercase;color:#9b9fc0;font-weight:950;letter-spacing:.35px}.pickup-card .loc{font-size:18px;color:var(--text);font-weight:950;margin:16px 0 7px;line-height:1.15}.pickup-card p{font-size:10px;color:var(--muted);margin:0;line-height:1.3}.section-check-progress{margin-top:auto;padding-top:12px}.check-progress-track{height:4px;border-radius:99px;background:#2a293a;overflow:hidden}.check-progress-fill{height:100%;width:var(--progress,0%);border-radius:inherit;background:linear-gradient(90deg,var(--blue),var(--purple2));transition:width .18s ease}.section-check-progress.complete .check-progress-fill{background:var(--green)}.section-check-progress small{display:block;margin-top:6px;color:#858aa3;font-size:8.5px;font-weight:800;text-transform:none;letter-spacing:0}.section-check-progress.complete small{color:var(--green)}.destinations{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;min-width:0}.dest-card{border:1px solid var(--line);border-radius:12px;background:linear-gradient(180deg,#1c1d29,#14141e);display:grid;grid-template-rows:42px minmax(60px,1fr) 34px;overflow:hidden;min-height:144px}.dest-card h4{margin:0;padding:11px 11px;border-bottom:1px solid var(--line);font-size:9px;text-transform:uppercase;color:#ececff;letter-spacing:.22px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:rgba(124,99,255,.04)}.items{padding:7px 8px;min-height:0}.item{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:3px 0;color:var(--blue);font-size:10.8px;font-weight:800}.item.completed{color:var(--green)}.item.abandoned{color:var(--red)}.load-item{position:relative;min-height:34px;padding:6px 7px;border:1px solid transparent;border-radius:8px;cursor:pointer;user-select:none;transition:background .14s,border-color .14s,opacity .14s}.load-item:hover{background:rgba(90,167,255,.055);border-color:rgba(90,167,255,.16)}.load-item:focus-within{outline:2px solid rgba(90,167,255,.36);outline-offset:1px}.load-check{position:absolute;opacity:0;pointer-events:none}.check-box{width:17px;height:17px;flex:0 0 17px;border:1px solid #4a4961;border-radius:5px;background:#11111a;display:grid;place-items:center;transition:.14s}.check-box:after{content:"";width:8px;height:4px;border-left:2px solid #07120d;border-bottom:2px solid #07120d;transform:rotate(-45deg) scale(0);transition:transform .13s}.load-check:checked+.check-box{border-color:rgba(73,237,160,.78);background:var(--green);box-shadow:0 0 12px rgba(73,237,160,.20)}.load-check:checked+.check-box:after{transform:rotate(-45deg) scale(1)}.load-item.is-loaded{background:rgba(73,237,160,.045);border-color:rgba(73,237,160,.12);color:var(--green)}.load-item.is-loaded .commodity-label,.load-item.is-loaded>b{opacity:.56}.load-item.is-loaded .commodity-label>span:last-child{text-decoration:line-through;text-decoration-thickness:1px}.commodity-label{display:inline-flex;align-items:center;gap:7px;min-width:0;flex:1}.cargo-icon{width:15px;height:15px;flex:0 0 15px;fill:currentColor;filter:drop-shadow(0 0 3px currentColor)}.total{display:flex;align-items:center;justify-content:space-between;gap:8px;border-top:1px solid var(--line);padding:0 11px;color:#e0e3fb;font-weight:900;font-size:9.5px;background:rgba(255,255,255,.018)}.total .loaded-count{color:var(--muted)}.total.complete .loaded-count,.total.complete .loaded-scu{color:var(--green)}.logistics-empty{margin:11px 13px 13px;border:1px dashed var(--line2);border-radius:13px;padding:26px;text-align:center;color:var(--muted);font-size:11px}
-.footer{height:28px;align-self:end;display:flex;align-items:center;justify-content:space-between;gap:12px;color:#777d97;font-size:9.5px;padding:0 2px;white-space:nowrap;overflow:hidden}.footer span{overflow:hidden;text-overflow:ellipsis}.greenText{color:var(--green)!important}.blueText{color:var(--blue)!important}.redText{color:var(--red)!important}.amberText{color:var(--amber)!important}
+.route-planner{min-height:290px;overflow:hidden;background:linear-gradient(180deg,rgba(28,28,43,.99),rgba(15,16,25,.995))}.route-planner-head{min-height:62px;display:flex;align-items:center;gap:16px;padding:0 14px;border-bottom:1px solid var(--line);background:linear-gradient(90deg,rgba(82,61,149,.20),rgba(21,22,34,.42) 36%,rgba(21,22,34,.76));min-width:0}.route-planner-title{display:flex;align-items:baseline;gap:10px;min-width:180px}.route-planner-title h2{margin:0;color:#f3f1ff;font-size:16px;font-weight:950}.route-planner-title small{max-width:250px;color:#8d92ab;font-size:8.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.route-metrics{margin-left:auto;display:flex;align-items:stretch;min-width:0}.route-metric{min-width:106px;padding:3px 14px;border-left:1px solid rgba(255,255,255,.08)}.route-metric span{display:block;color:#858aa3;font-size:7.5px;font-weight:850;text-transform:uppercase;letter-spacing:.45px}.route-metric strong{display:block;margin-top:4px;color:#eff1ff;font:850 12px Consolas,monospace;white-space:nowrap}.route-tools{display:flex;gap:8px;align-items:center;margin-left:4px}.route-tools .btn{height:36px}.route-config{min-height:42px;display:flex;align-items:center;gap:8px;padding:6px 14px;border-bottom:1px solid rgba(255,255,255,.055);background:rgba(10,11,18,.48)}.route-scope{display:flex;gap:5px}.route-scope button{height:28px;min-width:86px;padding:0 12px;border:1px solid var(--line);border-radius:7px;background:#11111a;color:var(--muted);font-size:8.5px;font-weight:850;cursor:pointer}.route-scope button.active{border-color:rgba(90,167,255,.55);background:rgba(90,167,255,.11);color:var(--blue)}.route-config details{position:relative}.route-config summary{height:28px;display:flex;align-items:center;gap:7px;padding:0 10px;border:1px solid var(--line);border-radius:7px;background:#11111a;color:#aeb3cc;font-size:8.5px;font-weight:800;cursor:pointer;list-style:none;white-space:nowrap}.route-config summary::-webkit-details-marker{display:none}.route-config details[open] summary{border-color:rgba(124,99,255,.56);color:#fff;background:rgba(124,99,255,.09)}.route-config summary:after{content:"⌄";color:#777d97;font-size:10px}.route-config details[open] summary:after{content:"⌃"}.route-contracts,.route-waypoint-popover{position:absolute;left:0;top:34px;z-index:85;width:310px;max-height:230px;padding:9px;overflow:auto;border:1px solid var(--line2);border-radius:10px;background:linear-gradient(180deg,#1b1a29,#101018);box-shadow:0 18px 46px rgba(0,0,0,.62)}.route-contract{display:flex;gap:7px;align-items:flex-start;margin:4px 0;padding:5px 6px;border-radius:6px;color:var(--soft);font-size:8.5px;line-height:1.3}.route-contract:hover{background:rgba(90,167,255,.055)}.route-contracts.scope-all{opacity:.76}.route-contracts.scope-all input{pointer-events:none}.route-waypoint-popover{width:330px;overflow:visible}.route-waypoint-editor>div:first-of-type{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px}.route-waypoint-editor input{min-width:0;height:29px;border:1px solid var(--line);border-radius:7px;background:#0d0d15;color:var(--text);padding:0 8px;font-size:8.5px}.route-waypoint-editor .btn{height:29px;padding:0 10px}.route-waypoints{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.route-waypoint{display:inline-flex;align-items:center;gap:5px;max-width:100%;padding:4px 6px;border:1px solid rgba(124,99,255,.24);border-radius:7px;background:rgba(124,99,255,.07);color:#c0b9e8;font-size:8px}.route-waypoint span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.route-waypoint button{border:0;background:transparent;color:#8489a1;padding:0;cursor:pointer;font-size:11px;line-height:1}.route-progress{padding:8px 18px 7px;border-bottom:1px solid rgba(255,255,255,.05);background:rgba(8,9,15,.36)}.route-progress-label{display:block;margin-bottom:7px;color:#8c91aa;font-size:7.5px;font-weight:850;text-transform:uppercase;letter-spacing:.5px}.route-progress-track{display:flex;align-items:center;min-width:540px}.route-progress-segment{display:flex;align-items:center;flex:1;min-width:70px}.route-progress-segment:last-child{flex:0}.route-progress-node{width:20px;height:20px;flex:0 0 20px;display:grid;place-items:center;border:1px solid #45465c;border-radius:50%;background:#171822;color:#aeb3ca;font:850 8px Consolas,monospace}.route-progress-node.start{border-color:#7d6cff;background:linear-gradient(180deg,#6656c0,#342a6c);color:#fff;box-shadow:0 0 0 3px rgba(124,99,255,.11),0 0 13px rgba(90,167,255,.24)}.route-progress-leg{position:relative;flex:1;height:20px;display:flex;align-items:center;justify-content:center;min-width:52px}.route-progress-leg:before{content:"";position:absolute;left:5px;right:5px;top:9px;border-top:1px dashed #4d5067}.route-progress-leg em{position:relative;padding:0 5px;background:#10111a;color:#aeb3cc;font-size:7px;font-style:normal;white-space:nowrap}.route-stops{display:flex;align-items:stretch;gap:0;min-height:205px;padding:10px 14px 14px;overflow:auto;scrollbar-color:#494361 #11111a}.route-stop{position:relative;flex:0 0 205px;min-height:190px;padding:10px;border:1px solid var(--line);border-radius:11px;background:linear-gradient(180deg,#1c1d29,#13141d);box-shadow:0 9px 20px rgba(0,0,0,.22)}.route-stop.start-stop{flex-basis:285px;border-color:rgba(90,167,255,.86);box-shadow:0 0 0 1px rgba(90,167,255,.22),0 12px 28px rgba(0,0,0,.35),inset 0 0 38px rgba(90,167,255,.035)}.route-stop.user-waypoint{border-color:rgba(124,99,255,.48)}.route-stop-top{display:flex;align-items:center;gap:7px;margin-bottom:10px}.route-stop-number{width:24px;height:24px;display:grid;place-items:center;border:1px solid #484a60;border-radius:6px;background:#262837;color:#f2f3ff;font:850 10px Consolas,monospace}.route-start-badge,.waypoint-label{display:inline-flex;align-items:center;height:19px;padding:0 7px;border:1px solid rgba(90,167,255,.25);border-radius:5px;background:rgba(90,167,255,.09);color:var(--blue);font-size:7px;font-weight:950;text-transform:uppercase;letter-spacing:.4px}.waypoint-label{border-color:rgba(124,99,255,.28);background:rgba(124,99,255,.09);color:#b9adff}.route-stop h4{margin:0 0 3px;color:#fff;font-size:12px;line-height:1.2}.route-stop .location-subtitle{display:block;margin-top:3px;color:#777d97;font-size:7.5px;font-weight:650}.route-action-title{margin-top:11px;padding-top:8px;border-top:1px solid rgba(255,255,255,.055)}.route-action-title span{display:block;color:#757b96;font-size:7px;font-weight:900;text-transform:uppercase;letter-spacing:.55px}.route-action-title strong{display:block;margin-top:3px;color:#dfe2f5;font-size:9px}.route-cargo-list{display:grid;gap:5px;margin-top:8px}.route-cargo-row{display:grid;grid-template-columns:8px minmax(0,1fr) auto;gap:6px;align-items:center;color:#d8dbed;font-size:8.5px}.route-cargo-dot{width:8px;height:8px;border-radius:2px;background:var(--cargo-color,#8b8fa8);box-shadow:0 0 7px color-mix(in srgb,var(--cargo-color,#8b8fa8) 46%,transparent)}.route-cargo-row span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.route-cargo-row b{font-size:8px;white-space:nowrap}.route-cargo-destination{grid-column:2/-1;margin-top:-3px;color:#737993;font-size:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.route-leg-note{display:block;margin-top:auto;padding-top:10px;color:#797f98;font-size:7.5px}.route-stop-connector{width:30px;flex:0 0 30px;display:grid;place-items:center;color:var(--blue);font-size:21px;font-weight:300}.route-empty{width:100%;padding:24px;color:var(--muted);font-size:10px}.route-resolutions{margin-top:10px}.bug-fix-panel{margin-bottom:12px;padding:10px;border:1px solid rgba(255,194,77,.25);border-radius:10px;background:rgba(255,194,77,.04)}.bug-fix-head{display:flex;align-items:center;justify-content:space-between;gap:10px}.bug-fix-head strong{font-size:10px}.bug-fix-panel p{margin:6px 0;color:var(--muted);font-size:9px;line-height:1.4}.bug-original{margin-top:8px;padding-top:8px;border-top:1px solid var(--line);font-size:9px;color:var(--soft)}.bug-original label{display:flex;gap:7px;align-items:center;margin:5px 0}.bug-notice{color:var(--amber)!important}.footer{height:28px;align-self:end;display:flex;align-items:center;justify-content:space-between;gap:12px;color:#777d97;font-size:9.5px;padding:0 2px;white-space:nowrap;overflow:hidden}.footer span{overflow:hidden;text-overflow:ellipsis}.greenText{color:var(--green)!important}.blueText{color:var(--blue)!important}.redText{color:var(--red)!important}.amberText{color:var(--amber)!important}
 .toast{position:fixed;right:18px;bottom:18px;z-index:650;display:grid;grid-template-columns:minmax(0,1fr) 16px;gap:9px;align-items:center;max-width:min(430px,calc(100vw - 36px));min-width:min(300px,calc(100vw - 36px));min-height:34px;padding:8px 10px 8px 12px;border:1px solid rgba(90,167,255,.52);border-radius:8px;background:#101018;color:#dbe7ff;font-size:11px;line-height:1.3;box-shadow:0 14px 34px rgba(0,0,0,.38);opacity:0;transform:translateY(8px);pointer-events:none;transition:.18s}.toast.show{opacity:1;transform:translateY(0);pointer-events:auto}.toast-message{min-width:0;min-height:16px;display:flex;align-items:center;overflow-wrap:anywhere}.toast-close{align-self:start;width:16px;height:16px;padding:0;border:0;background:transparent;color:inherit;opacity:.68;cursor:pointer;display:grid;place-items:center;line-height:0;transition:opacity .14s,transform .14s}.toast-close svg{display:block;width:10px;height:10px;stroke:currentColor;stroke-width:2.25;stroke-linecap:round;pointer-events:none}.toast-close:hover{opacity:1;transform:scale(1.08)}.toast-success{border-color:rgba(73,237,160,.64);color:#d8ffe9;background:#0f1d18}.toast-info{border-color:rgba(90,167,255,.64);color:#dbe7ff;background:#101824}.toast-error{border-color:rgba(255,100,118,.68);color:#ffd1d7;background:#211014}.status-wrap{display:flex;align-items:center;gap:8px;min-width:0}.modal-backdrop{position:fixed;inset:0;z-index:300;display:none;align-items:center;justify-content:center;padding:24px;background:rgba(2,2,7,.78);backdrop-filter:blur(7px)}.modal-backdrop.open{display:flex}.editor-modal{width:min(900px,calc(100vw - 44px));max-height:min(760px,calc(100vh - 44px));display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;overflow:hidden;border:1px solid var(--line2);border-radius:16px;background:linear-gradient(180deg,#1b1a29,#101018);box-shadow:0 28px 90px rgba(0,0,0,.72)}.editor-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:16px 18px;border-bottom:1px solid var(--line)}.editor-head h3{margin:0;font-size:15px}.editor-head small{display:block;margin-top:4px;color:var(--muted);font-size:9px}.editor-close{width:24px;height:24px;padding:0;border:0;background:transparent;color:var(--muted);display:grid;place-items:center;line-height:0;cursor:pointer;transition:color .14s,transform .14s}.editor-close svg{width:12px;height:12px;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;pointer-events:none}.editor-close:hover{color:#fff;transform:scale(1.08)}.editor-meta{display:grid;grid-template-columns:minmax(0,1fr) 180px;gap:12px;padding:13px 18px;border-bottom:1px solid rgba(255,255,255,.05)}.editor-field{display:grid;gap:6px}.editor-field label{font-size:8.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);font-weight:900}.editor-field input{height:34px;border:1px solid var(--line);border-radius:8px;background:#0d0d15;color:var(--text);padding:0 10px;outline:0}.editor-field input:focus,.editor-row input:focus,.ocr-panel textarea:focus{border-color:rgba(124,99,255,.72);box-shadow:0 0 0 3px rgba(124,99,255,.09)}.editor-body{min-height:0;overflow:auto;padding:12px 18px}.ocr-panel{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-bottom:12px;padding:10px;border:1px solid rgba(124,99,255,.18);border-radius:10px;background:rgba(124,99,255,.045)}.ocr-panel textarea{min-height:58px;resize:vertical;border:1px solid var(--line);border-radius:8px;background:#0d0d15;color:var(--text);padding:8px 9px;outline:0;font-size:10px}.ocr-actions{display:grid;gap:7px;align-content:start}.editor-grid-head,.editor-row{display:grid;grid-template-columns:minmax(150px,1fr) minmax(180px,1.4fr) minmax(130px,.85fr) 80px 30px;gap:8px;align-items:center}.editor-grid-head{padding:0 2px 7px;color:var(--muted);font-size:8px;text-transform:uppercase;letter-spacing:.55px;font-weight:900}.editor-row{margin-bottom:8px}.editor-row input{height:34px;min-width:0;border:1px solid var(--line);border-radius:8px;background:#0d0d15;color:var(--text);padding:0 9px;outline:0}.editor-remove{height:30px;padding:0;border:1px solid rgba(255,100,118,.3);border-radius:7px;background:rgba(255,100,118,.06);color:var(--red);cursor:pointer;display:grid;place-items:center;line-height:0;transition:border-color .14s,background .14s,transform .14s}.editor-remove svg{width:13px;height:13px;fill:currentColor;pointer-events:none}.editor-remove:hover{border-color:rgba(255,100,118,.58);background:rgba(255,100,118,.11);transform:translateY(-.5px)}.editor-empty{padding:26px;text-align:center;color:var(--muted)}.editor-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:13px 18px;border-top:1px solid var(--line)}.editor-footer-group{display:flex;gap:8px}.editor-help{color:var(--muted);font-size:9px;max-width:390px;line-height:1.35}@media(max-width:760px){.editor-grid-head{display:none}.editor-row{grid-template-columns:1fr 1fr}.editor-row input:nth-child(3){grid-column:1}.editor-row input:nth-child(4){grid-column:2}.editor-remove{grid-column:2;justify-self:end;width:30px}.editor-meta{grid-template-columns:1fr}.editor-help{display:none}.ocr-panel{grid-template-columns:1fr}.toast{right:12px;bottom:12px;max-width:calc(100vw - 24px);min-width:0}}.confirm-modal{width:min(430px,calc(100vw - 40px));overflow:hidden;border:1px solid var(--line2);border-radius:15px;background:linear-gradient(180deg,#1b1a29,#101018);box-shadow:0 28px 90px rgba(0,0,0,.72)}.confirm-head{display:grid;grid-template-columns:36px minmax(0,1fr) 24px;gap:12px;align-items:start;padding:17px 18px 12px}.confirm-icon{width:36px;height:36px;display:grid;place-items:center;border:1px solid rgba(255,100,118,.26);border-radius:10px;background:rgba(255,100,118,.08);color:var(--red)}.confirm-icon svg{width:17px;height:17px;fill:currentColor}.confirm-copy{min-width:0}.confirm-copy h3{margin:1px 0 5px;font-size:15px;line-height:1.2}.confirm-copy p{margin:0;color:var(--soft);font-size:10.5px;line-height:1.45}.confirm-contract{margin:0 18px 14px;padding:10px 11px;border:1px solid rgba(255,255,255,.055);border-radius:9px;background:#0d0d15;color:#dfe2f6;font-size:10.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.confirm-close{width:24px;height:24px;padding:0;border:0;background:transparent;color:var(--muted);display:grid;place-items:center;line-height:0;cursor:pointer;transition:color .14s,transform .14s}.confirm-close svg{width:12px;height:12px;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;pointer-events:none}.confirm-close:hover{color:#fff;transform:scale(1.08)}.confirm-footer{display:flex;justify-content:flex-end;gap:8px;padding:12px 18px 15px;border-top:1px solid var(--line)}.info-modal{position:relative;width:min(1040px,calc(100vw - 44px));max-height:min(840px,calc(100vh - 44px));display:grid;grid-template-rows:auto minmax(0,1fr) auto;overflow:hidden;border:1px solid var(--line2);border-radius:16px;background:linear-gradient(180deg,#1b1a29,#101018);box-shadow:0 28px 90px rgba(0,0,0,.72)}
+.location-combobox{position:relative;min-width:0}.location-combobox>input{width:100%}.editor-row:focus-within{position:relative;z-index:25}.location-autocomplete{position:absolute;z-index:80;top:calc(100% + 5px);left:0;width:max(100%,290px);max-height:230px;overflow:auto;padding:5px;border:1px solid rgba(124,99,255,.42);border-radius:10px;background:linear-gradient(180deg,#1b1a29,#12121c);box-shadow:0 18px 42px rgba(0,0,0,.62);scrollbar-color:#484164 #12121c}.location-autocomplete.open-up{top:auto;bottom:calc(100% + 5px);box-shadow:0 -18px 42px rgba(0,0,0,.62)}.location-autocomplete[hidden]{display:none}.location-option{display:grid;width:100%;gap:3px;padding:8px 9px;border:1px solid transparent;border-radius:7px;background:transparent;color:#edf0ff;text-align:left;cursor:pointer}.location-option strong{font-size:10px;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.location-option small{color:#858ba6;font-size:8px;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.location-option:hover,.location-option.active{border-color:rgba(90,167,255,.25);background:rgba(90,167,255,.09)}.location-option:hover small,.location-option.active small{color:#aeb7d7}.location-empty-option{padding:10px;color:var(--muted);font-size:9px}
 .info-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:17px 18px;border-bottom:1px solid var(--line)}.info-title{display:flex;align-items:flex-start;gap:12px;min-width:0}.info-icon{width:38px;height:38px;flex:0 0 38px;display:grid;place-items:center;border:1px solid rgba(90,167,255,.28);border-radius:11px;background:rgba(90,167,255,.08);color:var(--blue)}.info-icon svg{width:18px;height:18px;fill:currentColor}.info-title h3{margin:1px 0 4px;font-size:15px}.info-title small{display:block;color:var(--muted);font-size:9px}.info-body{min-height:0;overflow:auto;padding:0;scroll-behavior:smooth}.info-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 18px 15px;border-top:1px solid var(--line)}.info-footer small{color:var(--muted);font-size:9px}
 .guide-shell{position:relative;display:grid;grid-template-columns:188px minmax(0,1fr);min-height:100%}.guide-shell:before{content:"";position:absolute;inset:0 auto 0 0;width:188px;z-index:0;border-right:1px solid rgba(255,255,255,.06);background:linear-gradient(180deg,rgba(13,13,21,.98),rgba(13,13,21,.92));pointer-events:none}.guide-nav{position:sticky;top:0;align-self:start;display:grid;gap:4px;padding:16px 12px;z-index:2}.guide-nav-title{padding:0 8px 8px;color:var(--muted);font-size:8px;font-weight:900;letter-spacing:.7px;text-transform:uppercase}.guide-nav a{display:grid;grid-template-columns:22px minmax(0,1fr);align-items:center;gap:8px;min-height:34px;padding:6px 8px;border:1px solid transparent;border-radius:8px;color:var(--soft);font-size:10px;font-weight:700;text-decoration:none;transition:background .14s,border-color .14s,color .14s}.guide-nav a span{width:22px;height:22px;display:grid;place-items:center;border:1px solid rgba(124,99,255,.24);border-radius:7px;background:rgba(124,99,255,.07);color:var(--purple2);font-size:9px;font-weight:900}.guide-nav a:hover,.guide-nav a:focus-visible{outline:0;border-color:rgba(124,99,255,.35);background:rgba(124,99,255,.08);color:#fff}.guide-content{min-width:0;padding:18px 20px 30px}.guide-hero{margin-bottom:18px;padding:16px 17px;border:1px solid rgba(85,217,255,.18);border-radius:12px;background:linear-gradient(135deg,rgba(85,217,255,.055),rgba(124,99,255,.055))}.guide-kicker{display:inline-flex;margin-bottom:7px;color:var(--cyan);font-size:8px;font-weight:900;letter-spacing:.7px;text-transform:uppercase}.guide-hero h4{margin:0;font-size:15px;line-height:1.35}.guide-hero p{margin:8px 0 0;color:var(--soft);font-size:10.5px;line-height:1.55}.guide-section{scroll-margin-top:16px;padding:19px 0;border-top:1px solid rgba(255,255,255,.065)}.guide-section:first-of-type{border-top:0}.guide-section-head{display:grid;grid-template-columns:30px minmax(0,1fr);gap:10px;align-items:start;margin-bottom:11px}.guide-section-number{width:30px;height:30px;display:grid;place-items:center;border:1px solid rgba(124,99,255,.32);border-radius:9px;background:rgba(124,99,255,.09);color:var(--purple2);font-size:11px;font-weight:900}.guide-section h4{margin:0 0 3px;font-size:13px}.guide-section-head p{margin:0;color:var(--muted);font-size:9.5px;line-height:1.4}.guide-steps{margin:0 0 12px;padding-left:20px;color:var(--soft);font-size:10.5px;line-height:1.55}.guide-steps li{padding:2px 0 5px 3px}.guide-steps strong{color:#fff}.guide-note{margin:10px 0 12px;padding:10px 11px;border-left:3px solid var(--blue);border-radius:0 8px 8px 0;background:rgba(90,167,255,.07);color:var(--soft);font-size:10px;line-height:1.5}.guide-note.warning{border-left-color:var(--amber);background:rgba(255,194,77,.065)}.guide-note.danger{border-left-color:var(--red);background:rgba(255,100,118,.06)}.guide-figure{margin:12px 0 0}.guide-figure.compact{max-width:540px}.guide-image-button{display:block;width:100%;padding:0;border:1px solid rgba(154,147,203,.25);border-radius:10px;background:#090910;overflow:hidden;cursor:zoom-in;line-height:0;box-shadow:0 12px 28px rgba(0,0,0,.22);transition:border-color .14s,transform .14s}.guide-image-button:hover,.guide-image-button:focus-visible{outline:0;border-color:rgba(90,167,255,.58);transform:translateY(-1px)}.guide-image-button img{display:block;width:100%;height:auto}.guide-figure figcaption{margin-top:6px;color:var(--muted);font-size:8.5px;line-height:1.35}.guide-media-grid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(210px,.65fr);gap:12px;align-items:start;margin-top:12px}.guide-media-grid.compact{grid-template-columns:repeat(2,minmax(0,1fr));max-width:620px}.guide-media-card{min-width:0}.guide-media-card h5{margin:0 0 6px;font-size:10px}.guide-media-card p{margin:7px 0 0;color:var(--muted);font-size:9px;line-height:1.4}.guide-action-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin:10px 0 12px}.guide-action{padding:10px 11px;border:1px solid rgba(255,255,255,.07);border-radius:9px;background:rgba(255,255,255,.025)}.guide-action strong{display:block;margin-bottom:3px;color:#fff;font-size:10px}.guide-action span{display:block;color:var(--muted);font-size:9px;line-height:1.4}.guide-troubleshooting{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.guide-trouble{padding:10px 11px;border:1px solid rgba(255,255,255,.07);border-radius:9px;background:#0d0d15}.guide-trouble strong{display:block;margin-bottom:4px;font-size:10px}.guide-trouble p{margin:0;color:var(--muted);font-size:9px;line-height:1.45}.guide-lightbox{position:absolute;inset:0;z-index:20;display:none;align-items:center;justify-content:center;padding:22px;background:rgba(2,2,7,.9);backdrop-filter:blur(8px)}.guide-lightbox.open{display:flex}.guide-lightbox-frame{max-width:100%;max-height:100%;display:grid;grid-template-rows:minmax(0,1fr) auto;gap:8px}.guide-lightbox-frame img{display:block;max-width:100%;max-height:calc(100vh - 150px);margin:auto;border:1px solid var(--line2);border-radius:10px;box-shadow:0 24px 70px rgba(0,0,0,.58)}.guide-lightbox-frame p{margin:0;color:var(--soft);font-size:9.5px;text-align:center}.guide-lightbox-close{position:absolute;top:15px;right:15px;width:32px;height:32px;padding:0;border:1px solid rgba(255,255,255,.14);border-radius:9px;background:#171621;color:#fff;display:grid;place-items:center;cursor:pointer}.guide-lightbox-close svg{width:13px;height:13px;stroke:currentColor;stroke-width:2.2;stroke-linecap:round}.guide-lightbox-close:hover{border-color:rgba(90,167,255,.5);color:var(--cyan)}
 @media(max-width:820px){.info-modal{width:min(760px,calc(100vw - 28px));max-height:calc(100vh - 28px)}.guide-shell{grid-template-columns:1fr}.guide-shell:before{display:none}.guide-nav{position:sticky;top:0;grid-auto-flow:column;grid-auto-columns:max-content;overflow-x:auto;border-right:0;border-bottom:1px solid rgba(255,255,255,.06);padding:9px 10px;background:linear-gradient(180deg,rgba(13,13,21,.98),rgba(13,13,21,.92))}.guide-nav-title{display:none}.guide-nav a{min-height:30px}.guide-content{padding:15px}.guide-media-grid,.guide-media-grid.compact{grid-template-columns:1fr;max-width:none}.guide-action-grid,.guide-troubleshooting{grid-template-columns:1fr}}
@@ -8300,6 +10165,47 @@ body{font-size:var(--type-ui);font-weight:var(--weight-body)}
 .status-copy strong,.metric-main,.duration-value,.rank-chip,.next-action strong,.item,.total{font-weight:var(--weight-strong)}
 .scu-stack strong{font:var(--weight-strong) var(--type-ui) Consolas,monospace}
 .duration-value{font-family:Consolas,monospace}
+.table td.location-cell{height:49px}.location-stack{display:grid;min-width:0;line-height:1.1}.location-stack .location-name{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis}.location-stack .location-subtitle{display:block;margin-top:3px;color:#777d97;font-size:7.5px;font-weight:700;line-height:1.05;text-transform:none;letter-spacing:.1px;overflow:hidden;text-overflow:ellipsis}.pickup-card .location-stack .location-subtitle{font-size:8px}.dest-card h4{height:auto}.dest-card h4 .location-subtitle{color:#747a95;font-size:7px}.route-stop .location-subtitle{display:block;margin-top:3px;color:#777d97;font-size:8px;font-weight:650}
+.unresolved-location .location-name,.unresolved-location .location-subtitle{color:var(--amber)!important}.dest-card:has(.unresolved-location){border-color:rgba(255,194,77,.28)}
+.route-stop{display:flex;flex-direction:column}.route-planner-head{position:relative;z-index:6;min-height:48px;justify-content:space-between;gap:11px;background:transparent}.route-planner-head .title-row h2{color:inherit;font-size:var(--type-heading);font-weight:var(--weight-strong)}.route-planner-head .title-row small{max-width:none;color:var(--muted);font-size:var(--type-meta);font-weight:var(--weight-body)}.route-mode-tools{display:flex;align-items:center;gap:5px;min-width:0;margin-left:auto}.route-mode-button{height:27px;border:1px solid rgba(154,147,203,.18);border-radius:7px;background:#101018;color:#aeb4ce;padding:0 9px;font-size:var(--type-control);font-weight:var(--weight-control);line-height:1;letter-spacing:.01em;cursor:pointer;white-space:nowrap}.route-mode-button:hover{border-color:rgba(90,167,255,.46);color:#fff}.route-mode-button.active{border-color:rgba(90,167,255,.66);background:rgba(90,167,255,.12);color:#fff}.route-contract-picker{position:relative}.route-contract-picker .route-contracts{right:0;left:auto;top:33px}.route-remove-button{width:28px;height:27px;padding:0;border:1px solid rgba(255,100,118,.24);border-radius:7px;background:rgba(255,100,118,.045);color:#a86e79;display:grid;place-items:center;cursor:pointer}.route-remove-button svg{width:12px;height:12px;fill:currentColor}.route-remove-button:hover:not(:disabled){border-color:rgba(255,100,118,.52);background:rgba(255,100,118,.09);color:var(--red)}.route-remove-button:disabled{opacity:.32;cursor:default}.route-waypoint-legacy{display:none}
+.route-stops{align-items:flex-start;min-height:105px;padding:12px 14px 14px}.route-stop{flex-basis:220px;min-height:74px;padding:9px 72px 9px 9px;cursor:pointer;transition:border-color .14s,background .14s,box-shadow .14s}.route-stop.start-stop{flex-basis:240px}.route-stop:hover{border-color:rgba(90,167,255,.34)}.route-stop:focus-visible{outline:2px solid rgba(90,167,255,.58);outline-offset:2px}.route-stop-heading{display:flex;align-items:center;gap:9px;min-width:0}.route-stop-location{min-width:0;flex:1}.route-stop-location h4{margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.route-stop-location .location-subtitle{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.route-stop-distance{position:absolute;right:10px;top:50%;display:grid;justify-items:end;gap:2px;transform:translateY(-50%);white-space:nowrap}.route-stop-distance small{color:#858ba4;font-size:7px;font-weight:950;line-height:1;text-transform:uppercase;letter-spacing:.55px}.route-stop-distance strong{color:#fff;font:900 13px/1 Consolas,monospace;letter-spacing:.1px}.route-stop-badges{display:flex;align-items:center;flex-wrap:wrap;gap:5px;min-height:19px;margin-top:8px}.route-stop-badge{display:inline-flex;align-items:center;height:19px;padding:0 7px;border:1px solid rgba(154,147,203,.22);border-radius:5px;background:rgba(154,147,203,.07);color:#aeb4ce;font-size:7px;font-weight:950;text-transform:uppercase;letter-spacing:.4px}.route-stop-badge.start{border-color:rgba(90,167,255,.28);background:rgba(90,167,255,.09);color:var(--blue)}.route-stop-badge.pickup{border-color:rgba(73,237,160,.24);background:rgba(73,237,160,.07);color:var(--green)}.route-stop-badge.dropoff{border-color:rgba(124,99,255,.3);background:rgba(124,99,255,.09);color:#b9adff}.route-stop-badge.waypoint{border-color:rgba(255,194,77,.27);background:rgba(255,194,77,.07);color:var(--amber)}.route-stop-details{display:none;gap:9px;margin-top:9px;padding-top:8px;border-top:1px solid rgba(255,255,255,.06)}.route-stop.details-open{min-height:118px}.route-stop.details-open .route-stop-badges{display:none}.route-stop.details-open .route-stop-details{display:grid}.route-stop-detail-group{display:grid;gap:5px}.route-stop-detail-group>strong{color:#858ba4;font-size:7px;font-weight:950;letter-spacing:.55px;text-transform:uppercase}.route-stop-detail-row{display:grid;grid-template-columns:7px minmax(0,1fr) auto;align-items:center;gap:6px;color:#dfe2f4;font-size:8px}.route-stop-detail-row i{width:7px;height:7px;border-radius:2px;background:var(--cargo-color,#8b8fa8);box-shadow:0 0 6px color-mix(in srgb,var(--cargo-color,#8b8fa8) 42%,transparent)}.route-stop-detail-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.route-stop-detail-row b{font-size:7.5px;white-space:nowrap}.route-stop-connector{align-self:flex-start;width:38px;flex-basis:38px;height:82px;color:#68adff}.route-stop-connector svg{display:block;width:27px;height:27px;fill:currentColor;filter:drop-shadow(0 0 7px rgba(90,167,255,.2))}.route-stop.details-open+.route-stop-connector{height:118px}
+.route-stops.route-timeline{display:grid;align-items:initial;gap:0;min-height:180px;padding:14px 16px 16px;overflow-x:hidden}.route-timeline .route-stop{display:grid;grid-template-columns:minmax(220px,1fr) minmax(170px,1fr);align-items:center;width:auto;min-height:76px;padding:11px 18px 11px 74px;border-radius:13px}.route-timeline .route-stop.start-stop{width:auto;min-height:86px}.route-timeline .route-stop-heading{grid-column:1;margin:0}.route-timeline .route-stop-number{position:absolute;left:20px;top:50%;width:36px;height:36px;border-radius:50%;transform:translateY(-50%);font-size:11px;z-index:2}.route-timeline .route-stop-badges{grid-column:2;margin:0;padding-left:12px;border-left:1px solid rgba(255,255,255,.06)}.route-timeline .route-stop-details{grid-column:2;margin:0;padding:0 0 0 12px;border-top:0;border-left:1px solid rgba(255,255,255,.06)}.route-timeline .route-stop.details-open{min-height:112px}.route-timeline .route-stop-distance{display:none}.route-timeline .route-stop-connector{position:relative;display:flex;align-items:center;width:auto;height:34px;padding-left:76px;color:#7f89ad}.route-timeline .route-stop-connector:before{content:"";position:absolute;left:37px;top:0;bottom:0;width:2px;background:linear-gradient(180deg,rgba(90,167,255,.65),rgba(124,99,255,.3))}.route-timeline .route-stop-connector svg{position:absolute;left:27px;top:7px;width:22px;height:22px;transform:rotate(90deg);color:#6faeff;filter:drop-shadow(0 0 6px rgba(90,167,255,.24))}.route-connector-distance{display:flex;align-items:baseline;gap:6px;white-space:nowrap}.route-connector-distance small{color:#737b9a;font-size:7px;font-weight:950;letter-spacing:.55px}.route-connector-distance strong{color:#aeb5d2;font:850 9px Consolas,monospace}.route-timeline .route-empty{min-height:120px}
+.route-planner-body{display:grid;grid-template-columns:minmax(0,1fr) 258px;gap:12px;align-items:start;padding-right:14px}.route-planner-body .route-stops{padding-right:2px}.route-summary-box{margin-top:14px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(180deg,#1b1c29,#12131c);overflow:hidden}.route-summary-box h3{margin:0;padding:13px 14px;border-bottom:1px solid rgba(255,255,255,.065);font-size:var(--type-heading);font-weight:var(--weight-strong)}.route-summary-metrics{display:grid}.route-summary-metric{display:grid;grid-template-columns:34px minmax(0,1fr) auto;gap:10px;align-items:center;min-height:62px;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.055)}.route-summary-metric:last-child{border-bottom:0}.route-summary-icon{width:32px;height:32px;display:grid;place-items:center;border:1px solid rgba(154,147,203,.18);border-radius:50%;background:rgba(154,147,203,.045);color:#9299b8}.route-summary-icon svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.8}.route-summary-copy strong{display:block;color:#dfe2f5;font-size:var(--type-ui);font-weight:var(--weight-strong)}.route-summary-copy small{display:block;margin-top:3px;color:var(--muted);font-size:var(--type-meta)}.route-summary-value{text-align:right;color:#fff;font:900 12px Consolas,monospace;white-space:nowrap}.route-summary-value small{display:block;margin-top:3px;color:#7f86a1;font:var(--weight-body) var(--type-meta) "Segoe UI",sans-serif}.route-timeline .route-stop-badge{height:22px;padding:0 9px;font-size:8px}.route-timeline .route-stop-connector{position:relative;display:flex;align-items:center;width:auto;height:34px;padding-left:76px;color:#7f89ad}.route-timeline .route-stop-connector:before{content:"";position:absolute;left:37px;top:0;bottom:0;width:2px;background:linear-gradient(180deg,rgba(90,167,255,.65),rgba(124,99,255,.3))}.route-connector-distance{display:flex;align-items:baseline;gap:6px;white-space:nowrap}.route-connector-distance small{color:#737b9a;font-size:7px;font-weight:950;letter-spacing:.55px}.route-connector-distance strong{color:#aeb5d2;font:850 9px Consolas,monospace}.route-timeline .route-empty{min-height:120px}
+@media(max-width:760px){.route-timeline .route-stop{grid-template-columns:1fr;padding-left:64px}.route-timeline .route-stop-badges,.route-timeline .route-stop-details{grid-column:1;margin-top:8px;padding:8px 0 0;border-left:0;border-top:1px solid rgba(255,255,255,.06)}.route-timeline .route-stop-number{left:15px}.route-timeline .route-stop-connector:before{left:32px}.route-timeline .route-stop-connector svg{left:22px}.route-timeline .route-stop-connector{padding-left:66px}}
+@media(max-width:980px){.route-planner-body{grid-template-columns:1fr;padding-right:0}.route-summary-box{margin:0 14px 14px}.route-summary-metrics{grid-template-columns:1fr 1fr}.route-summary-metric:nth-child(odd){border-right:1px solid rgba(255,255,255,.055)}}
+.route-planner-body{grid-template-columns:minmax(0,1fr) 286px;gap:14px;padding:14px;background:linear-gradient(180deg,rgba(12,13,21,.34),rgba(8,9,15,.12))}.route-planner-body .route-stops{padding:0}.route-stops.route-timeline{align-content:start}.route-timeline .route-stop{grid-template-columns:minmax(210px,1.18fr) minmax(175px,.82fr);min-height:72px;padding:12px 18px 12px 70px;border-color:rgba(154,147,203,.14);background:linear-gradient(90deg,rgba(30,31,45,.96),rgba(20,21,31,.94));box-shadow:inset 0 1px 0 rgba(255,255,255,.025),0 7px 18px rgba(0,0,0,.14)}.route-timeline .route-stop:hover{border-color:rgba(90,167,255,.42);background:linear-gradient(90deg,rgba(31,34,49,.98),rgba(21,23,34,.96));box-shadow:inset 0 1px 0 rgba(255,255,255,.04),0 9px 22px rgba(0,0,0,.2)}.route-timeline .route-stop.start-stop{min-height:78px;background:linear-gradient(90deg,rgba(28,36,53,.98),rgba(20,23,36,.96));box-shadow:inset 3px 0 0 rgba(90,167,255,.8),inset 0 1px 0 rgba(255,255,255,.035),0 10px 24px rgba(0,0,0,.2)}.route-timeline .route-stop-number{left:17px;width:38px;height:38px;border-color:rgba(154,165,211,.28);background:linear-gradient(180deg,#292c3e,#1c1e2c);box-shadow:0 0 0 4px #141520,0 6px 14px rgba(0,0,0,.28)}.route-timeline .start-stop .route-stop-number{border-color:rgba(90,167,255,.8);background:linear-gradient(180deg,#304d78,#202b4b);box-shadow:0 0 0 4px #151923,0 0 18px rgba(90,167,255,.22)}.route-timeline .route-stop-location h4{color:#f4f5ff;font-size:12.5px;font-weight:900;letter-spacing:.02em}.route-timeline .route-stop-location .location-subtitle{margin-top:4px;color:#858ca7;font-size:8px}.route-timeline .route-stop-badges{gap:7px;padding-left:16px}.route-timeline .route-stop-badge{height:24px;padding:0 10px;border-radius:6px;font-size:8.2px;letter-spacing:.32px;box-shadow:inset 0 1px 0 rgba(255,255,255,.035)}.route-timeline .route-stop-badge:before{margin-right:5px;font-size:11px;line-height:1}.route-timeline .route-stop-badge.start:before{content:"★"}.route-timeline .route-stop-badge.waypoint:before{content:"◆"}.route-timeline .route-stop-connector{height:36px;padding-left:70px}.route-timeline .route-stop-connector:before{left:36px;width:1px;background:linear-gradient(180deg,rgba(90,167,255,.48),rgba(124,99,255,.3))}.route-connector-distance{gap:7px;padding:4px 8px;border:1px solid rgba(154,147,203,.1);border-radius:6px;background:rgba(13,14,22,.72)}.route-connector-distance small{font-size:7.5px;color:#79819f}.route-connector-distance strong{font-size:9.5px;color:#c7cce2}.route-summary-box{position:sticky;top:12px;margin:0;border-color:rgba(154,147,203,.18);background:linear-gradient(180deg,#1d1e2c,#12131d);box-shadow:inset 0 1px 0 rgba(255,255,255,.03),0 12px 28px rgba(0,0,0,.2)}.route-summary-box h3{display:flex;align-items:center;justify-content:space-between;min-height:46px;padding:0 14px;font-size:13px}.route-summary-box h3:after{content:"ROUTE DATA";color:#777f9e;font-size:7px;font-weight:900;letter-spacing:.7px}.route-summary-metrics{grid-template-columns:1fr 1fr}.route-summary-metric{min-height:70px;padding:12px 13px}.route-summary-metric:first-child,.route-summary-metric:nth-child(2){grid-column:1/-1}.route-summary-metric:first-child{min-height:86px;background:linear-gradient(90deg,rgba(90,167,255,.055),rgba(124,99,255,.035))}.route-summary-metric:nth-child(3){border-right:1px solid rgba(255,255,255,.055)}.route-summary-metric:nth-child(3),.route-summary-metric:nth-child(4){grid-template-columns:32px minmax(0,1fr);gap:8px;min-height:78px}.route-summary-metric:nth-child(3) .route-summary-value,.route-summary-metric:nth-child(4) .route-summary-value{grid-column:2;text-align:left;font-size:14px}.route-summary-icon{width:34px;height:34px;border-color:rgba(124,137,188,.24);background:linear-gradient(180deg,rgba(70,77,108,.16),rgba(28,30,44,.16))}.route-summary-metric:first-child .route-summary-icon{color:var(--blue);border-color:rgba(90,167,255,.3);background:rgba(90,167,255,.07)}.route-summary-copy strong{font-size:10px}.route-summary-copy small{font-size:8px}.route-summary-value{font-size:14px}.route-summary-metric:first-child .route-summary-value{color:#f4f7ff;font-size:16px;text-shadow:0 0 14px rgba(90,167,255,.16)}
+.route-timeline .route-stop{grid-template-columns:minmax(175px,.95fr) auto minmax(190px,1.05fr);column-gap:14px;cursor:default}.route-timeline .route-stop-badges{grid-column:2;padding-left:14px}.route-stop-commodities{grid-column:3;display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:6px;min-width:0;padding-left:14px;border-left:1px solid rgba(255,255,255,.06)}.route-stop-commodity{display:inline-grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:center;gap:6px;max-width:170px;min-height:25px;padding:0 8px;border:1px solid color-mix(in srgb,var(--cargo-color,#8b8fa8) 22%,rgba(255,255,255,.035));border-radius:7px;background:color-mix(in srgb,var(--cargo-color,#8b8fa8) 7%,rgba(255,255,255,.012));color:#dfe2f3;font-size:8.5px}.route-stop-commodity:before{content:"";width:8px;height:8px;border-radius:2px;background:var(--cargo-color,#8b8fa8);box-shadow:0 0 7px color-mix(in srgb,var(--cargo-color,#8b8fa8) 48%,transparent)}.route-stop-commodity span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.route-stop-commodity b{color:#aeb7d3;font-size:8px;white-space:nowrap}.route-stop-commodity.pickup{box-shadow:inset 2px 0 0 rgba(73,237,160,.42)}.route-stop-commodity.dropoff{box-shadow:inset 2px 0 0 rgba(124,99,255,.46)}
+@media(max-width:980px){.route-planner-body{grid-template-columns:1fr;padding:12px}.route-summary-box{position:static;margin:0}.route-summary-metrics{grid-template-columns:repeat(2,1fr)}.route-summary-metric:first-child,.route-summary-metric:nth-child(2){grid-column:auto}.route-summary-metric:nth-child(odd){border-right:1px solid rgba(255,255,255,.055)}}
+@media(max-width:760px){.route-timeline .route-stop{grid-template-columns:1fr;padding-left:64px}.route-timeline .route-stop-badges,.route-timeline .route-stop-details{grid-column:1;margin-top:9px;padding:9px 0 0;border-left:0;border-top:1px solid rgba(255,255,255,.06)}.route-timeline .route-stop-number{left:13px}.route-timeline .route-stop-connector:before{left:32px}.route-timeline .route-stop-connector{padding-left:62px}.route-summary-metrics{grid-template-columns:1fr}.route-summary-metric:first-child,.route-summary-metric:nth-child(2){grid-column:1}.route-summary-metric:nth-child(odd){border-right:0}.route-summary-metric:nth-child(3),.route-summary-metric:nth-child(4){grid-template-columns:34px minmax(0,1fr) auto}.route-summary-metric:nth-child(3) .route-summary-value,.route-summary-metric:nth-child(4) .route-summary-value{grid-column:auto;text-align:right}}
+@media(max-width:1180px){.route-timeline .route-stop{grid-template-columns:minmax(175px,1fr) auto}.route-stop-commodities{grid-column:1/-1;margin-top:10px;padding:10px 0 0;border-left:0;border-top:1px solid rgba(255,255,255,.055)}}
+@media(max-width:760px){.route-timeline .route-stop{grid-template-columns:1fr;padding-left:64px}.route-timeline .route-stop-badges{grid-column:1;margin-top:9px;padding:9px 0 0;border-left:0;border-top:1px solid rgba(255,255,255,.06)}.route-stop-commodities{grid-column:1;margin-top:8px;padding-top:8px}.route-timeline .route-stop-number{left:13px}.route-timeline .route-stop-connector:before{left:32px}.route-timeline .route-stop-connector{padding-left:62px}}
+@media(max-width:980px){.route-planner-head{flex-wrap:wrap;padding:10px 12px}.route-metrics{order:3;width:100%;margin-left:0}.route-metric{flex:1}.route-config{flex-wrap:wrap}.route-progress{overflow-x:auto}.route-stop.start-stop{flex-basis:250px}}
+@media(max-width:660px){.route-planner-title{min-width:0;flex:1}.route-planner-title small{display:none}.route-metrics{display:grid;grid-template-columns:1fr 1fr}.route-metric{padding:5px 9px}.route-config details{position:static}.route-config{position:relative}.route-contracts,.route-waypoint-popover{left:10px;right:10px;top:40px;width:auto}.route-stops{padding-inline:10px}.route-stop{flex-basis:190px}.route-stop.start-stop{flex-basis:230px}}
+.route-planner-body .route-stops.route-timeline{padding:0 0 0 22px}.route-timeline .route-stop{grid-template-columns:minmax(155px,.68fr) auto minmax(300px,1.32fr);column-gap:9px;min-height:58px;margin-left:18px;padding:8px 12px 8px 32px}.route-timeline .route-stop.start-stop{min-height:62px;box-shadow:inset 0 1px 0 rgba(255,255,255,.035),0 8px 20px rgba(0,0,0,.18)}.route-timeline .route-stop-number,.route-timeline .start-stop .route-stop-number{left:-18px;width:36px;height:36px;border-width:1px;box-shadow:0 0 0 5px #151621,0 5px 13px rgba(0,0,0,.3)}.route-timeline .start-stop .route-stop-number{box-shadow:0 0 0 5px #17202d,0 0 17px rgba(90,167,255,.22)}.route-timeline .route-stop-badges{gap:6px;padding-left:7px}.route-timeline .route-stop-badge{height:22px;padding:0 8px;font-size:7.8px}.route-stop-commodities{display:grid;grid-template-rows:repeat(2,minmax(18px,auto));grid-auto-flow:column;grid-auto-columns:minmax(112px,1fr);align-items:center;justify-content:stretch;gap:3px 12px;min-height:39px;padding-left:10px}.route-stop-commodity{display:grid;grid-template-columns:14px minmax(0,1fr) auto;align-items:center;gap:6px;max-width:none;min-height:18px;padding:0;border:0;border-radius:0;background:none;box-shadow:none!important;color:#dde1f2;font-size:8.5px}.route-stop-commodity:before{display:none}.route-stop-commodity i{display:grid;place-items:center;width:14px;height:14px;color:var(--cargo-color,#8b8fa8);font-style:normal}.route-stop-commodity .cargo-icon{width:13px;height:13px;fill:currentColor;color:inherit;filter:drop-shadow(0 0 3px currentColor)}.route-stop-commodity span{font-weight:720}.route-stop-commodity b{color:#929bb8;font-size:7.8px}.route-timeline .route-stop-connector{height:30px;margin-left:18px;padding-left:31px}.route-timeline .route-stop-connector:before{left:0}.route-connector-distance{padding:3px 7px}.route-connector-distance strong{font-size:9px}
+@media(max-width:1180px){.route-timeline .route-stop{grid-template-columns:minmax(155px,1fr) auto;min-height:58px}.route-stop-commodities{grid-column:1/-1;margin-top:6px;padding:7px 0 0;border-left:0;border-top:1px solid rgba(255,255,255,.05)}}
+@media(max-width:760px){.route-planner-body .route-stops.route-timeline{padding-left:18px}.route-timeline .route-stop{grid-template-columns:1fr;margin-left:16px;padding-left:28px}.route-timeline .route-stop-number,.route-timeline .start-stop .route-stop-number{left:-17px;width:34px;height:34px}.route-timeline .route-stop-badges{grid-column:1;margin-top:7px;padding:7px 0 0}.route-stop-commodities{grid-column:1;grid-auto-columns:minmax(100px,1fr);margin-top:6px}.route-timeline .route-stop-connector{margin-left:16px;padding-left:29px}.route-timeline .route-stop-connector:before{left:0}}
+.route-timeline .route-stop{grid-template-columns:minmax(145px,.58fr) max-content minmax(330px,1.42fr);column-gap:8px;min-height:50px;padding-top:5px;padding-bottom:5px}.route-timeline .route-stop.start-stop{min-height:54px}.route-timeline .route-stop-badges{grid-column:2;justify-self:start;gap:10px;margin:0;padding:0;border:0}.route-stop-action{display:inline-flex;align-items:center;gap:5px;height:auto;padding:0;border:0;background:transparent;font-size:8.5px;font-weight:900;line-height:1;text-transform:uppercase;letter-spacing:.3px;white-space:nowrap}.route-stop-action .route-icon{width:11px;height:11px;flex:0 0 11px}.route-stop-action.pickup{color:#6f9bd1}.route-stop-action.dropoff{color:#8979d8}.route-stop-action.waypoint{color:var(--amber)}.route-stop-commodities{padding-left:8px}.route-stop-commodities.single{grid-template-rows:minmax(18px,auto);grid-template-columns:minmax(0,1fr);grid-auto-flow:row;grid-auto-columns:auto}.route-stop-commodities.single .route-stop-commodity{width:100%}.route-stop-commodities.single .route-stop-commodity b{justify-self:end}.route-timeline .route-stop-connector{height:27px}
+@media(max-width:1180px){.route-timeline .route-stop{grid-template-columns:minmax(145px,1fr) max-content;min-height:50px}.route-timeline .route-stop-badges{grid-column:2}.route-stop-commodities{grid-column:1/-1}.route-stop-commodities.single{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:760px){.route-timeline .route-stop{grid-template-columns:1fr}.route-timeline .route-stop-badges{grid-column:1;margin-top:4px;padding-top:0;border:0}.route-stop-commodities{grid-column:1;margin-top:4px}.route-stop-commodities.single{grid-template-columns:minmax(0,1fr)}}
+.route-timeline .route-stop{grid-template-columns:123px 88px minmax(0,1fr);column-gap:0}.route-timeline .route-stop-badges{width:88px;box-sizing:border-box;justify-content:flex-end;padding-right:15px}.route-stop-commodities,.route-stop-commodities.single{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));grid-template-rows:repeat(2,minmax(18px,auto));grid-auto-flow:column;grid-auto-columns:auto;gap:3px 10px;width:100%;min-width:0;box-sizing:border-box;padding-left:12px;border-left:1px solid rgba(255,255,255,.075)}.route-stop-commodities.single .route-stop-commodity{width:auto}.route-stop-commodities.single .route-stop-commodity b{justify-self:auto}
+@media(max-width:1180px){.route-timeline .route-stop{grid-template-columns:123px 88px minmax(0,1fr)}.route-timeline .route-stop-badges{grid-column:2}.route-stop-commodities,.route-stop-commodities.single{grid-column:3;margin-top:0;padding-top:0;border-top:0;border-left:1px solid rgba(255,255,255,.075)}}
+@media(max-width:760px){.route-timeline .route-stop{grid-template-columns:1fr}.route-timeline .route-stop-badges{grid-column:1;width:auto}.route-stop-commodities,.route-stop-commodities.single{grid-column:1;grid-template-columns:repeat(2,minmax(0,1fr));margin-top:4px;padding:5px 0 0;border-top:1px solid rgba(255,255,255,.05);border-left:0}}
+.route-summary-box{border-color:rgba(154,147,203,.2);background:linear-gradient(180deg,#1b1c2a,#11121b);box-shadow:inset 0 1px 0 rgba(255,255,255,.035),0 12px 28px rgba(0,0,0,.22)}.route-summary-box h3{min-height:43px;padding:0 13px;background:rgba(255,255,255,.012);font-size:12px}.route-summary-box h3:after{content:"ROUTE OVERVIEW";font-size:6.5px;letter-spacing:.75px}.route-summary-content{display:grid}.route-summary-primary{display:grid;grid-template-columns:34px minmax(0,1fr) auto;gap:9px;align-items:center;min-height:67px;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.06);background:linear-gradient(90deg,rgba(90,167,255,.065),rgba(124,99,255,.025))}.route-summary-primary .route-summary-icon{width:32px;height:32px;color:var(--blue);border-color:rgba(90,167,255,.32);background:rgba(90,167,255,.075)}.route-summary-primary .route-summary-copy strong{font-size:11px}.route-summary-primary .route-summary-copy small{margin-top:3px;font-size:8.5px}.route-summary-primary .route-summary-value{color:#f5f7ff;font-size:15px;text-shadow:0 0 14px rgba(90,167,255,.14)}.route-summary-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border-bottom:1px solid rgba(255,255,255,.06)}.route-summary-stat{display:grid;gap:6px;min-width:0;padding:10px 8px;text-align:center;border-right:1px solid rgba(255,255,255,.055)}.route-summary-stat:last-child{border-right:0}.route-summary-stat span{color:#8e96b3;font-size:8px;font-weight:850;text-transform:uppercase;letter-spacing:.3px}.route-summary-stat strong{overflow:hidden;color:#eef0ff;font:900 12px Consolas,monospace;white-space:nowrap;text-overflow:ellipsis}.route-summary-journey{position:relative;display:grid;gap:10px;padding:11px 12px 12px;border-bottom:1px solid rgba(255,255,255,.06)}.route-summary-section-label{color:#858daa;font-size:7.8px;font-weight:900;text-transform:uppercase;letter-spacing:.55px}.route-summary-endpoint{position:relative;display:grid;grid-template-columns:15px minmax(0,1fr);gap:8px;align-items:center;min-width:0}.route-summary-endpoint i{position:relative;z-index:1;width:9px;height:9px;margin-left:2px;border:2px solid #171925;border-radius:50%;background:#6e7898;box-shadow:0 0 0 1px rgba(154,165,211,.26)}.route-summary-endpoint.start i{background:var(--blue);box-shadow:0 0 0 1px rgba(90,167,255,.45),0 0 8px rgba(90,167,255,.22)}.route-summary-endpoint.final i{background:#9b82ff;box-shadow:0 0 0 1px rgba(155,130,255,.42)}.route-summary-endpoint.start:after{content:"";position:absolute;left:6px;top:14px;width:1px;height:23px;background:linear-gradient(180deg,rgba(90,167,255,.5),rgba(155,130,255,.35))}.route-summary-endpoint span{display:block;min-width:0}.route-summary-endpoint small{display:block;color:#8e96b3;font-size:8px;font-weight:800}.route-summary-endpoint strong{display:block;margin-top:3px;overflow:hidden;color:#e8eaf8;font-size:10.5px;font-weight:850;white-space:nowrap;text-overflow:ellipsis}.route-summary-payout{display:flex;align-items:flex-end;justify-content:space-between;gap:8px;min-height:59px;padding:10px 12px;background:linear-gradient(90deg,rgba(73,237,160,.045),rgba(73,237,160,.012))}.route-summary-payout>span{min-width:0}.route-summary-payout small{display:block;color:#8991ad;font-size:8px;font-weight:750}.route-summary-payout>span>small{font-weight:900;text-transform:uppercase;letter-spacing:.35px}.route-summary-payout strong{display:block;margin-top:4px;color:var(--green);font:900 14px Consolas,monospace;white-space:nowrap}.route-summary-payout>small{max-width:100px;text-align:right;line-height:1.3}.route-summary-value{font-variant-numeric:tabular-nums}
+.route-summary-primary{grid-template-columns:minmax(0,1fr) auto;min-height:72px;padding:11px 13px}.route-summary-primary .route-summary-copy strong{font-size:12.5px}.route-summary-primary .route-summary-copy small{font-size:9.5px}.route-summary-primary .route-summary-value{font-size:17px}.route-summary-stat{gap:7px;padding:11px 8px}.route-summary-stat span{font-size:9px}.route-summary-stat strong{font-size:13.5px}.route-summary-journey{gap:11px;padding:12px 13px 13px}.route-summary-section-label{font-size:9px}.route-summary-endpoint{gap:9px}.route-summary-endpoint small{font-size:9px}.route-summary-endpoint strong{font-size:11.5px}.route-summary-endpoint.start:after{top:15px;height:25px}.route-summary-payout{min-height:63px;padding:11px 13px}.route-summary-payout small{font-size:9px}.route-summary-payout strong{font-size:15.5px}.route-summary-payout>small{max-width:108px}
+.route-custom-tools{display:flex;align-items:end;gap:6px;padding:8px 14px;border-bottom:1px solid var(--line);background:rgba(10,11,18,.68)}.route-custom-tools[hidden]{display:none}.route-custom-tools label{display:grid;gap:3px;color:#858daa;font-size:7.5px;font-weight:850;text-transform:uppercase;letter-spacing:.35px}.route-custom-tools input{width:145px;height:29px;padding:0 8px;border:1px solid var(--line);border-radius:7px;background:#0d0e16;color:var(--text);font-size:8.5px}.route-custom-tools .btn{height:29px;padding:0 9px}.route-custom-tools>small{align-self:center;margin-left:auto;max-width:230px;color:#858daa;font-size:8px;line-height:1.35}.route-stop.route-draggable{cursor:grab}.route-stop.route-dragging{opacity:.45}.route-stop.route-drop-target{border-color:rgba(90,167,255,.72)!important;box-shadow:0 0 0 2px rgba(90,167,255,.12)!important}.route-stop.route-drop-target:after{content:"";position:absolute;left:12px;right:12px;height:2px;border-radius:2px;background:var(--blue);box-shadow:0 0 8px rgba(90,167,255,.7);pointer-events:none}.route-stop.route-drop-before:after{top:-2px}.route-stop.route-drop-after:after{bottom:-2px}.route-stops.route-reordering .route-draggable{pointer-events:none}.route-stop.complete-stop{border-color:rgba(73,237,160,.46)!important;background:linear-gradient(90deg,rgba(28,62,51,.72),rgba(19,31,29,.88))!important}.route-stop.complete-stop .route-stop-number{border-color:rgba(73,237,160,.6);color:var(--green)}
+.route-custom-tools{align-items:center;justify-content:flex-end;min-height:52px;padding:8px 14px}.route-custom-tools .route-reoptimize-copy{display:grid;gap:2px;max-width:430px;margin-right:4px;text-align:right}.route-reoptimize-copy strong{color:#d7daed;font-size:9px}.route-reoptimize-copy small{color:#858daa;font-size:8px;line-height:1.35}.route-custom-tools #routeReoptimizeBtn{height:30px;min-width:116px;padding:0 12px}.route-custom-tools #routeReoptimizeBtn:disabled{border-color:rgba(154,147,203,.12);background:#12131c;color:#62677e;box-shadow:none;cursor:not-allowed;opacity:.65}.route-inline-insert{position:relative;display:flex;align-items:center;justify-content:center;min-height:30px;margin-left:18px;padding-left:0}.route-inline-insert.start{margin-bottom:5px}.route-inline-insert.final{margin-top:5px}.route-inline-insert.connector{position:absolute;left:50%;min-height:27px;margin:0;padding:0;transform:translateX(-50%)}.route-add-waypoint-button{height:24px;display:inline-flex;align-items:center;gap:5px;padding:0 9px;border:1px dashed rgba(90,167,255,.3);border-radius:6px;background:rgba(90,167,255,.035);color:#8fa9ce;font-size:7.8px;font-weight:850;cursor:pointer;white-space:nowrap}.route-timeline .route-stop-connector .route-add-waypoint-button svg,.route-add-waypoint-button svg{position:static;width:9px;height:9px;fill:currentColor;flex:0 0 9px;transform:none;color:inherit;filter:none}.route-add-waypoint-button:hover,.route-add-waypoint-button[aria-expanded="true"]{border-style:solid;border-color:rgba(90,167,255,.56);background:rgba(90,167,255,.09);color:var(--blue)}.route-inline-insert.editing .route-add-waypoint-button{display:none}.route-inline-popover{position:absolute;left:50%;top:29px;z-index:110;width:330px;padding:9px;border:1px solid var(--line2);border-radius:10px;background:linear-gradient(180deg,#1b1a29,#101018);box-shadow:0 18px 46px rgba(0,0,0,.65);transform:translateX(-50%)}.route-inline-insert.connector .route-inline-popover{left:50%;top:27px}.route-inline-insert.editing .route-inline-popover{position:relative;left:auto;top:auto;width:330px;padding:0;border:0;background:transparent;box-shadow:none;transform:none}.route-inline-popover[hidden]{display:none}.route-inline-popover-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;align-items:start}.route-inline-popover .location-combobox{position:relative;min-width:0}.route-inline-popover input{width:100%;height:30px;padding:0 9px;border:1px solid var(--line);border-radius:7px;background:#0d0e16;color:var(--text);font-size:8.5px}.route-inline-popover input:focus{border-color:rgba(124,99,255,.72);outline:0;box-shadow:0 0 0 2px rgba(124,99,255,.09)}.route-inline-popover .btn{height:30px;padding:0 10px}.route-inline-popover .location-autocomplete{z-index:120}.route-timeline .route-stop-connector{gap:8px}.route-timeline .route-stop-connector .route-inline-insert{display:flex}.route-timeline .route-stop-connector:has(.route-inline-popover:not([hidden])){z-index:105}
+.route-custom-tools #routeConfirmBtn{height:30px;min-width:104px;padding:0 12px}.route-custom-tools #routeConfirmBtn:disabled{border-color:rgba(154,147,203,.12);background:#12131c;color:#62677e;box-shadow:none;cursor:not-allowed;opacity:.65}.route-mode-button:disabled{opacity:.42;cursor:not-allowed}.route-inline-insert.start,.route-inline-insert.final{left:0;padding:9px 0}.route-inline-insert.start .route-add-waypoint-button,.route-inline-insert.final .route-add-waypoint-button{min-width:160px;height:32px;justify-content:center;font-size:8.4px}.route-stop.editable-stop{padding-right:42px}.route-stop-delete{position:absolute;right:9px;top:50%;display:grid;width:28px;height:28px;padding:0;place-items:center;transform:translateY(-50%);border:1px solid rgba(255,91,119,.22);border-radius:7px;background:rgba(255,91,119,.055);color:#c76b7d;cursor:pointer}.route-stop-delete:hover{border-color:rgba(255,91,119,.55);background:rgba(255,91,119,.12);color:#ff718b}.route-stop-delete svg{width:12px;height:12px;fill:currentColor}.route-user-waypoint-note{display:grid;gap:1px;color:#d5b76d}.route-user-waypoint-note strong{font-size:8.5px}.route-user-waypoint-note small{color:#8e8a7b;font-size:7.4px}
+.route-inline-insert{min-height:40px;margin-left:0}.route-inline-insert.start,.route-inline-insert.final{margin:0;padding:7px 0}.route-inline-insert.connector{min-height:40px}.route-add-waypoint-button{height:28px;min-width:132px;padding:0 12px;justify-content:center;font-size:8.4px}.route-timeline .route-stop-connector{height:40px}.route-timeline .route-stop-connector .route-add-waypoint-button svg,.route-add-waypoint-button svg{width:10px;height:10px;flex-basis:10px}
+.route-inline-insert.start,.route-inline-insert.final{margin-left:18px}.route-inline-insert.start .route-add-waypoint-button,.route-inline-insert.final .route-add-waypoint-button{min-width:132px;height:28px;padding:0 12px;font-size:8.4px}.route-inline-popover input{font-family:"Segoe UI Variable Text","Segoe UI",Inter,Arial,sans-serif;font-weight:500;letter-spacing:normal}
+.route-stop-action.waypoint .route-icon{width:12px;height:12px;fill:currentColor}.route-stop-commodities.waypoint-only{grid-template-columns:minmax(0,1fr);grid-template-rows:1fr;grid-auto-flow:row;align-content:center;align-items:center}.route-stop-commodities.waypoint-only .route-user-waypoint-note{align-self:center}
+@media(max-width:980px){.route-summary-content{grid-template-columns:minmax(220px,1.2fr) minmax(220px,1fr)}.route-summary-primary{border-right:1px solid rgba(255,255,255,.06)}.route-summary-stats{border-right:1px solid rgba(255,255,255,.06)}.route-summary-journey,.route-summary-payout{border-bottom:0}.route-summary-payout{border-top:1px solid rgba(255,255,255,.06)}}
+@media(max-width:620px){.route-summary-content{grid-template-columns:1fr}.route-summary-primary{border-right:0}.route-summary-stats{border-right:0}.route-summary-journey{border-bottom:1px solid rgba(255,255,255,.06)}.route-summary-payout{border-top:0}}
+.route-timeline .route-stop.complete-stop,.route-timeline .route-stop.start-stop.complete-stop{border-color:rgba(73,237,160,.62);background:linear-gradient(90deg,rgba(25,55,45,.96),rgba(18,31,29,.95));box-shadow:inset 3px 0 0 rgba(73,237,160,.78),inset 0 1px 0 rgba(255,255,255,.045),0 8px 22px rgba(0,0,0,.2),0 0 18px rgba(73,237,160,.055)}.route-timeline .route-stop.complete-stop:hover{border-color:rgba(73,237,160,.82);background:linear-gradient(90deg,rgba(28,63,51,.98),rgba(19,36,32,.97))}.route-timeline .route-stop.complete-stop .route-stop-number,.route-timeline .route-stop.start-stop.complete-stop .route-stop-number{border-color:rgba(73,237,160,.78);background:linear-gradient(180deg,#28684f,#193c31);color:#eafff5;box-shadow:0 0 0 5px #15231f,0 0 16px rgba(73,237,160,.2)}.route-timeline .route-stop.complete-stop .route-stop-location h4{color:#baffdc}.route-timeline .route-stop.complete-stop .route-stop-distance strong{color:#9decc3}
+.route-resolutions{display:grid;gap:8px;margin-top:12px;min-width:460px}.route-resolution{display:grid;grid-template-columns:minmax(120px,1fr) minmax(180px,1.4fr) auto;gap:7px;align-items:center}.route-resolution strong{color:var(--soft);font-size:9px;overflow:hidden;text-overflow:ellipsis}.route-resolution input{height:29px;border:1px solid var(--line);border-radius:8px;background:#0d0d15;color:var(--text);padding:0 9px;outline:0}
+.editor-close,.confirm-close{width:28px;height:28px;border-radius:7px;transition:background .14s,color .14s,transform .14s}.editor-close:hover,.confirm-close:hover{background:rgba(90,167,255,.08);color:#ff7181;transform:none}.editor-head,.info-head,.confirm-head{position:relative}.editor-head>.editor-close,.info-head>.editor-close,.confirm-head>.confirm-close{position:absolute;right:4px;top:4px;transform:none}
+.window-root,.editor-modal,.confirm-modal,.info-modal{border-radius:11px}
+.logistics-groups{align-content:start;gap:8px}.logistics-group+.logistics-group{padding-top:8px}
+@media(min-width:981px){.logistics-group .pickup-card,.logistics-group .destinations,.logistics-group .dest-card{height:168px;min-height:168px}.logistics-group.long-commodity-list .pickup-card,.logistics-group.long-commodity-list .destinations,.logistics-group.long-commodity-list .dest-card{height:auto}.logistics-group.long-commodity-list .pickup-card,.logistics-group.long-commodity-list .dest-card{min-height:168px}}
 @media(max-width:1290px){.shell{grid-template-columns:205px minmax(0,1fr)}.app{padding-top:12px}.cards{gap:7px}.card{padding:12px}.main{grid-template-rows:auto auto auto}.content-panel{min-height:280px}}
 @media(max-width:1120px){.topbar{grid-template-columns:200px minmax(190px,1fr)}.actions{grid-column:1/-1;justify-content:flex-start}}
 @media(max-width:980px){.topbar{grid-template-columns:1fr}.actions{grid-column:auto}.workspace-tools{flex-direction:column}.shell{grid-template-columns:1fr}.side{grid-template-columns:repeat(2,minmax(0,1fr))}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.logistics-group{grid-template-columns:1fr}.pickup-card{min-height:auto}.search{width:210px}}
@@ -8319,7 +10225,7 @@ body{font-size:var(--type-ui);font-weight:var(--weight-body)}
   <div class="app-viewport" id="appViewport">
 <div class="app">
   <header class="topbar">
-    <section class="brand"><div class="mark"><img src="/assets/sc_hauling_logo_mark.png" alt="SCHT logo"></div><div class="brand-copy"><h1>SCHT</h1><div class="brand-subtitle">SC Hauling Tracker</div><small id="version">v1.5.67</small></div></section>
+    <section class="brand"><div class="mark"><img src="/assets/sc_hauling_logo_mark.png" alt="SCHT logo"></div><div class="brand-copy"><h1>SCHT</h1><div class="brand-subtitle">SC Hauling Tracker</div><small id="version">v1.6.0</small></div></section>
     <div class="pathline"><label for="logPath">Game log</label><input id="logPath" spellcheck="false" autocomplete="off"></div>
     <nav class="actions" aria-label="App controls">
       <button class="btn" id="browseBtn" title="Choose a Star Citizen Game.log file">Choose Log</button><button class="btn" id="scanBtn" data-action="scan" title="Read the selected Game.log now">Scan Log</button><button class="btn primary" id="watchBtn" data-action="watch" title="Start monitoring Game.log for new contract events">Start Watch</button>
@@ -8348,6 +10254,11 @@ body{font-size:var(--type-ui);font-weight:var(--weight-body)}
         <div class="contract-resizer" id="contractResizer" role="separator" aria-orientation="horizontal" aria-label="Resize contract log"></div>
       </section>
       <section class="logistics panel" id="logisticsPanel"><div class="panel-head"><div class="title-row"><h2>Logistics board</h2><small id="logisticsInfo">Accepted contracts only · grouped by repeated locations</small></div><div class="checklist-tools"><span class="checklist-summary" id="checklistSummary"><strong id="checklistProgress">0/0 loaded</strong><small id="checklistScu">0/0 SCU</small></span><button class="view-toggle" id="hideLoadedBtn" type="button">Hide loaded</button><button class="overlay-open" id="openOverlayBtn" type="button" title="Overlay requires the standalone desktop application" disabled>Desktop only</button><button class="checklist-reset" id="clearChecklistBtn" type="button">Clear checks</button></div></div><div class="next-action" id="nextAction"><span><strong>Next:</strong> no active cargo</span><small>0 SCU</small></div><div class="logistics-groups" id="logisticsGroups"></div><div class="logistics-resizer" id="logisticsResizer" role="separator" aria-orientation="horizontal" aria-label="Resize logistics board"></div></section>
+      <section class="route-planner panel" id="routePlannerPanel">
+        <header class="panel-head route-planner-head"><div class="title-row"><h2>Route Planner</h2><small id="routeSummary">No route calculated</small></div><div class="route-mode-tools" role="group" aria-label="Route planning mode"><datalist id="routeLocationSuggestions"></datalist><button class="route-mode-button" type="button" data-route-scope="all">All active</button><div class="route-contract-picker"><button class="route-mode-button" id="routeContractsBtn" type="button" aria-expanded="false">Contracts</button><div class="route-contracts" id="routeContracts" hidden></div></div><button class="route-mode-button" id="routeCustomBtn" type="button" disabled>Custom</button><button class="route-mode-button" id="editRouteBtn" type="button">Edit</button><button class="route-mode-button" id="openRouteOverlayBtn" type="button" title="Route overlay requires the standalone desktop application" disabled>Overlay</button><button class="route-remove-button" id="routeRemoveBtn" type="button" title="Clear route" aria-label="Clear route"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true" focusable="false"><path d="M232.7 69.9L224 96L128 96C110.3 96 96 110.3 96 128C96 145.7 110.3 160 128 160L512 160C529.7 160 544 145.7 544 128C544 110.3 529.7 96 512 96L416 96L407.3 69.9C402.9 56.8 390.7 48 376.9 48L263.1 48C249.3 48 237.1 56.8 232.7 69.9zM512 208L128 208L149.1 531.1C150.7 556.4 171.7 576 197 576L443 576C468.3 576 489.3 556.4 490.9 531.1L512 208z"/></svg></button></div><div class="route-waypoint-legacy" aria-hidden="true"><span id="routeWaypointLabel">Extra locations</span><input id="routeWaypointInput" list="routeLocationSuggestions"><button id="addRouteWaypointBtn" type="button">Add</button><div id="routeWaypoints"></div></div></header>
+        <div class="route-custom-tools" id="routeCustomTools" hidden><span class="route-reoptimize-copy"><strong id="routeReoptimizeTitle">Route unchanged</strong><small id="routeReoptimizeHint">Reoptimize becomes available after you manually edit the route.</small></span><button type="button" class="btn primary" id="routeReoptimizeBtn" disabled>Reoptimize route</button><button type="button" class="btn primary" id="routeConfirmBtn" disabled>Confirm route</button></div>
+        <div class="route-planner-body"><div class="route-stops route-timeline" id="routeStops"><div class="route-empty">Choose All active or select contracts to calculate a route.</div></div><aside class="route-summary-box" aria-labelledby="routeSummaryTitle"><h3 id="routeSummaryTitle">Summary</h3><div class="route-summary-content"><section class="route-summary-primary"><span class="route-summary-copy"><strong>Total Distance</strong><small>Quantum travel</small></span><span class="route-summary-value" id="routeSummaryDistance">—</span></section><div class="route-summary-stats"><div class="route-summary-stat"><span>Total Cargo</span><strong id="routeSummaryCargo">—</strong></div><div class="route-summary-stat"><span>Stops</span><strong id="routeSummaryStops">—</strong></div><div class="route-summary-stat"><span>Contracts</span><strong id="routeSummaryContracts">—</strong></div></div><section class="route-summary-journey"><span class="route-summary-section-label">Route</span><div class="route-summary-endpoint start"><i aria-hidden="true"></i><span><small>Start Location</small><strong id="routeSummaryStart">—</strong></span></div><div class="route-summary-endpoint final"><i aria-hidden="true"></i><span><small>Final Location</small><strong id="routeSummaryFinal">—</strong></span></div></section><section class="route-summary-payout"><span><small>Expected Payout</small><strong id="routeSummaryPayout">—</strong></span><small id="routeSummaryPayoutNote">Selected contracts</small></section></div></aside></div>
+      </section>
     </main>
   </div>
   <footer class="footer"><span id="status">Ready</span><span id="footerRight">SCHT · SC Hauling Tracker</span></footer>
@@ -8366,7 +10277,7 @@ body{font-size:var(--type-ui);font-weight:var(--weight-body)}
   <section class="editor-modal" role="dialog" aria-modal="true" aria-labelledby="contractEditorTitle">
     <header class="editor-head"><div><h3 id="contractEditorTitle">Edit contract details</h3><small id="contractEditorMission">MissionId</small></div><button class="editor-close" id="contractEditorClose" type="button" aria-label="Close editor"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false"><path d="M3 3l10 10M13 3L3 13"/></svg></button></header>
     <div class="editor-meta"><div class="editor-field"><label>Contract</label><input id="contractEditorName" readonly></div><div class="editor-field"><label>Payout (aUEC)</label><input id="contractEditorPayout" inputmode="numeric" placeholder="e.g. 99500"></div></div>
-    <div class="editor-body"><div class="ocr-panel"><textarea id="contractOcrText" placeholder="Paste contract text here, or use Read screenshot in the desktop app. Review extracted rows before saving."></textarea><div class="ocr-actions"><button class="btn" id="contractOcrRead" type="button">Read screenshot</button><button class="btn" id="contractOcrParse" type="button">Parse text</button></div></div><div class="editor-grid-head"><span>Pick up</span><span>Drop off</span><span>Commodity</span><span>SCU</span><span></span></div><div id="contractEditorRows"></div><button class="btn" id="contractEditorAdd" type="button">Add objective</button></div>
+    <div class="editor-body"><div class="bug-fix-panel" id="contractBugFixPanel" hidden><div class="bug-fix-head"><strong>Multi-pickup bug fix</strong><button class="view-toggle" id="contractBugFixToggle" type="button" aria-pressed="false">Off</button></div><p>Only the selected pickup is used operationally. Original locations remain stored.</p><div id="contractBugWarning" class="bug-notice"></div><details><summary>Show original contract</summary><div class="bug-original" id="contractOriginalPickups"></div></details></div><div class="ocr-panel"><textarea id="contractOcrText" placeholder="Paste contract text here, or use Read screenshot in the desktop app. Review extracted rows before saving."></textarea><div class="ocr-actions"><button class="btn" id="contractOcrRead" type="button">Read screenshot</button><button class="btn" id="contractOcrParse" type="button">Parse text</button></div></div><div class="editor-grid-head"><span>Pick up</span><span>Drop off</span><span>Commodity</span><span>SCU</span><span></span></div><div id="contractEditorRows"></div><button class="btn" id="contractEditorAdd" type="button">Add objective</button></div>
     <footer class="editor-footer"><div class="editor-help">Use this only when Game.log omits objective quantities. Corrections are stored locally and tied to this exact MissionId.</div><div class="editor-footer-group"><button class="btn red" id="contractEditorClear" type="button">Clear saved</button><button class="btn" id="contractEditorCancel" type="button">Cancel</button><button class="btn primary" id="contractEditorSave" type="button">Save details</button></div></footer>
   </section>
 </div>
@@ -8394,22 +10305,23 @@ body{font-size:var(--type-ui);font-weight:var(--weight-body)}
 <!-- MANUAL_MAINTENANCE_REQUIRED: every user-facing feature or renamed control must update this guide, its screenshots when affected, docs/HELP_MANUAL_MAINTENANCE.md, and the manual regression test. -->
 <div class="modal-backdrop" id="infoModal" aria-hidden="true">
   <section class="info-modal" role="dialog" aria-modal="true" aria-labelledby="infoTitle">
-    <header class="info-head"><div class="info-title"><span class="info-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640"><path d="M320 576C461.4 576 576 461.4 576 320C576 178.6 461.4 64 320 64C178.6 64 64 178.6 64 320C64 461.4 178.6 576 320 576zM320 240C302.3 240 288 254.3 288 272C288 285.3 277.3 296 264 296C250.7 296 240 285.3 240 272C240 227.8 275.8 192 320 192C364.2 192 400 227.8 400 272C400 319.2 364 339.2 344 346.5L344 350.3C344 363.6 333.3 374.3 320 374.3C306.7 374.3 296 363.6 296 350.3L296 342.2C296 321.7 310.8 307 326.1 302C332.5 299.9 339.3 296.5 344.3 291.7C348.6 287.5 352 281.7 352 272.1C352 254.4 337.7 240.1 320 240.1zM288 432C288 414.3 302.3 400 320 400C337.7 400 352 414.3 352 432C352 449.7 337.7 464 320 464C302.3 464 288 449.7 288 432z"/></svg></span><div><h3 id="infoTitle">SCHT Help & User Guide</h3><small>Quick start, dashboard, loading board, OCR, corrections, and exports</small></div></div><button class="editor-close" id="infoClose" type="button" aria-label="Close help window"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false"><path d="M3 3l10 10M13 3L3 13"/></svg></button></header>
+    <header class="info-head"><div class="info-title"><span class="info-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640"><path d="M320 576C461.4 576 576 461.4 576 320C576 178.6 461.4 64 320 64C178.6 64 64 178.6 64 320C64 461.4 178.6 576 320 576zM320 240C302.3 240 288 254.3 288 272C288 285.3 277.3 296 264 296C250.7 296 240 285.3 240 272C240 227.8 275.8 192 320 192C364.2 192 400 227.8 400 272C400 319.2 364 339.2 344 346.5L344 350.3C344 363.6 333.3 374.3 320 374.3C306.7 374.3 296 363.6 296 350.3L296 342.2C296 321.7 310.8 307 326.1 302C332.5 299.9 339.3 296.5 344.3 291.7C348.6 287.5 352 281.7 352 272.1C352 254.4 337.7 240.1 320 240.1zM288 432C288 414.3 302.3 400 320 400C337.7 400 352 414.3 352 432C352 449.7 337.7 464 320 464C302.3 464 288 449.7 288 432z"/></svg></span><div><h3 id="infoTitle">SCHT Help & User Guide</h3><small>Quick start, dashboard, Logistics Board, Route Planner, overlays, OCR, and data</small></div></div><button class="editor-close" id="infoClose" type="button" aria-label="Close help window"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false"><path d="M3 3l10 10M13 3L3 13"/></svg></button></header>
     <div class="info-body" id="infoBody">
       <div class="guide-shell">
         <nav class="guide-nav" aria-label="User guide sections">
           <div class="guide-nav-title">User guide</div>
           <a id="guideQuickStartLink" href="#guideQuickStart"><span>1</span>Quick start</a>
           <a href="#guideDashboard"><span>2</span>Dashboard</a>
-          <a href="#guideLogistics"><span>3</span>Loading board</a>
-          <a href="#guideCorrections"><span>4</span>OCR & corrections</a>
-          <a href="#guideMenus"><span>5</span>Menus & data</a>
-          <a href="#guideTroubleshooting"><span>6</span>Troubleshooting</a>
+          <a href="#guideLogistics"><span>3</span>Logistics</a>
+          <a href="#guideRoutePlanner"><span>4</span>Route Planner</a>
+          <a href="#guideCorrections"><span>5</span>OCR & corrections</a>
+          <a href="#guideMenus"><span>6</span>Menus & data</a>
+          <a href="#guideTroubleshooting"><span>7</span>Troubleshooting</a>
         </nav>
         <main class="guide-content">
           <article class="guide-hero">
             <span class="guide-kicker">Normal workflow</span>
-            <h4>Choose the log once → Start Watch → keep a new contract open while OCR reads it → load cargo from the Logistics Board → complete the contract in Star Citizen.</h4>
+            <h4>Choose the log once → Start Watch → keep a new contract open while OCR reads it → calculate a route → load from the Logistics Board → complete the contract in Star Citizen.</h4>
             <p>SCHT reads the selected <strong>Game.log</strong>, keeps its own local checklist and corrections, and never changes the game log or your in-game contracts.</p>
           </article>
 
@@ -8424,18 +10336,23 @@ body{font-size:var(--type-ui);font-weight:var(--weight-body)}
               <li>Start the session timer from the first accepted mission or from now. Use <strong>Pause / Play</strong> without clearing any contracts.</li>
             </ol>
             <div class="guide-note warning"><strong>Do not switch away from the newly accepted contract too early.</strong> OCR needs the contract details and Primary Objectives to remain visible during capture.</div>
-            <figure class="guide-figure compact"><button class="guide-image-button" type="button" data-guide-image="/assets/help/toolbar.jpg" data-guide-caption="Primary toolbar: Choose Log, Scan Log, Start/Stop Watch, Share, Settings, and Help."><img src="/assets/help/toolbar.jpg" alt="SCHT primary toolbar controls" loading="lazy"></button><figcaption>Primary toolbar. Click any guide image to enlarge it.</figcaption></figure>
+            <figure class="guide-figure"><button class="guide-image-button" type="button" data-guide-image="/assets/help/toolbar.png" data-guide-caption="Primary toolbar with the Game.log path, Choose Log, Scan Log, Start Watch, Share, Settings, and Help."><img src="/assets/help/toolbar.png" alt="SCHT primary toolbar controls" loading="lazy"></button><figcaption>Primary toolbar. Click any guide image to enlarge it.</figcaption></figure>
           </section>
 
           <section class="guide-section" id="guideDashboard">
             <div class="guide-section-head"><span class="guide-section-number">2</span><div><h4>Read the dashboard</h4><p>Session information stays on the left; contracts and profit metrics stay in the main area.</p></div></div>
             <div class="guide-action-grid">
-              <div class="guide-action"><strong>Session cards</strong><span>Accepted and completed contracts, total profit, mission profit per hour, and session profit per hour.</span></div>
-              <div class="guide-action"><strong>Contract Log</strong><span>Grouped pickup/drop-off rows with commodity, SCU, payout, elapsed duration, rank, and current status.</span></div>
-              <div class="guide-action"><strong>Filters and search</strong><span>Show all, active, completed, or closed contracts; search by commodity, location, or status.</span></div>
-              <div class="guide-action"><strong>Edit and delete icons</strong><span>Edit repairs tracker data. Delete only removes the contract from SCHT; it does not abandon or change it in Star Citizen.</span></div>
+              <div class="guide-action"><strong>Session timer</strong><span>Start from the first mission for contract-relative elapsed time, start from now for a fresh clock, and pause or resume without clearing work.</span></div>
+              <div class="guide-action"><strong>Session and live status</strong><span>Completed and accepted counts, profit, last scan time, watcher state, and OCR readiness remain visible at a glance.</span></div>
+              <div class="guide-action"><strong>Performance cards</strong><span>Accepted and completed missions, total paid profit, mission profit per hour, and session profit per hour.</span></div>
+              <div class="guide-action"><strong>Contract Log</strong><span>Pickup and drop-off locations, commodity, SCU, payout, duration, rank, filters, search, edit, and delete controls.</span></div>
             </div>
-            <figure class="guide-figure"><button class="guide-image-button" type="button" data-guide-image="/assets/help/dashboard.jpg" data-guide-caption="Dashboard overview with session timer, statistics, Contract Log, filters, and live status."><img src="/assets/help/dashboard.jpg" alt="SCHT dashboard overview" loading="lazy"></button><figcaption>Dashboard overview with live statistics and grouped contract rows.</figcaption></figure>
+            <div class="guide-media-grid compact">
+              <div class="guide-media-card"><h5>Timer</h5><button class="guide-image-button" type="button" data-guide-image="/assets/help/session_timer.png" data-guide-caption="Session timer with first-mission, start-now, and pause or play controls."><img src="/assets/help/session_timer.png" alt="SCHT session timer" loading="lazy"></button></div>
+              <div class="guide-media-card"><h5>Status and live feed</h5><button class="guide-image-button" type="button" data-guide-image="/assets/help/session_status.png" data-guide-caption="Session status counts and the live Game.log and OCR feed."><img src="/assets/help/session_status.png" alt="SCHT session and live status panels" loading="lazy"></button></div>
+            </div>
+            <figure class="guide-figure"><button class="guide-image-button" type="button" data-guide-image="/assets/help/dashboard_metrics.png" data-guide-caption="Dashboard performance cards for missions, profit, and hourly rates."><img src="/assets/help/dashboard_metrics.png" alt="SCHT dashboard performance cards" loading="lazy"></button><figcaption>Session performance cards update from accepted and completed contract events.</figcaption></figure>
+            <figure class="guide-figure"><button class="guide-image-button" type="button" data-guide-image="/assets/help/contract_log.png" data-guide-caption="Contract Log with workflow filters, search, sorting, location context, commodities, quantities, duration, and rank."><img src="/assets/help/contract_log.png" alt="SCHT Contract Log" loading="lazy"></button><figcaption>Use the pencil to correct tracker data. Delete removes the contract only from SCHT and never abandons it in Star Citizen.</figcaption></figure>
           </section>
 
           <section class="guide-section" id="guideLogistics">
@@ -8445,16 +10362,36 @@ body{font-size:var(--type-ui);font-weight:var(--weight-body)}
               <li>Check each cargo item after it is loaded. Progress synchronizes between the main board and the overlay.</li>
               <li><strong>Hide loaded</strong> removes completed checklist items from view; <strong>Clear checks</strong> resets only the checklist.</li>
               <li>For a shared multi-pickup contract, SCHT shows the shared total but leaves per-location SCU blank when the game does not split the quantity.</li>
-              <li>Open the compact overlay for use over Star Citizen. Its gear menu controls opacity, resize lock, position lock, and always-on-top behavior.</li>
+              <li>Choose <strong>Open overlay</strong> for the compact loading view. Its cards follow the created Route Planner order while the main Logistics Board keeps its operational grouping.</li>
+              <li>Use the titlebar pin to lock movement. The gear menu controls opacity, size lock, and always-on-top behavior.</li>
             </ol>
             <div class="guide-media-grid">
-              <div class="guide-media-card"><h5>Logistics Board</h5><button class="guide-image-button" type="button" data-guide-image="/assets/help/logistics_board.jpg" data-guide-caption="Logistics Board with grouped pickup and drop-off cards, loaded checks, shared totals, and next-action guidance."><img src="/assets/help/logistics_board.jpg" alt="SCHT Logistics Board" loading="lazy"></button><p>Each location keeps a consistent card width; cargo checks are stored locally.</p></div>
-              <div class="guide-media-card"><h5>Hauling overlay</h5><button class="guide-image-button" type="button" data-guide-image="/assets/help/overlay.jpg" data-guide-caption="Compact hauling overlay and its window settings."><img src="/assets/help/overlay.jpg" alt="SCHT hauling overlay with settings" loading="lazy"></button><p>Drag the header to move it. Resize from the edges unless size lock is enabled.</p></div>
+              <div class="guide-media-card"><h5>Logistics Board</h5><button class="guide-image-button" type="button" data-guide-image="/assets/help/logistics_board.png" data-guide-caption="Logistics Board with standard-height pickup groups, destination cards, commodity checks, shared totals, and next-action guidance."><img src="/assets/help/logistics_board.png" alt="SCHT Logistics Board" loading="lazy"></button><p>Cards keep a standard height and expand only for longer commodity lists. Checklist state is stored locally.</p></div>
+              <div class="guide-media-card"><h5>Logistics Overlay</h5><button class="guide-image-button" type="button" data-guide-image="/assets/help/logistics_overlay.png" data-guide-caption="Compact Logistics Overlay with route-sorted pickup groups, destination rows, commodity quantities, and loading checks."><img src="/assets/help/logistics_overlay.png" alt="SCHT Logistics Overlay" loading="lazy"></button><p>Drag the header to move it. Resize from the window edges unless size lock is enabled.</p></div>
             </div>
+            <figure class="guide-figure compact"><button class="guide-image-button" type="button" data-guide-image="/assets/help/overlay_settings.png" data-guide-caption="Shared overlay settings for opacity, size lock, and always-on-top behavior."><img src="/assets/help/overlay_settings.png" alt="SCHT overlay settings" loading="lazy"></button><figcaption>Both overlays share the same compact window controls and settings design.</figcaption></figure>
+          </section>
+
+          <section class="guide-section" id="guideRoutePlanner">
+            <div class="guide-section-head"><span class="guide-section-number">4</span><div><h4>Plan and follow the route</h4><p>Route Planner orders active cargo stops by quantum-travel distance and keeps cargo actions attached to each location.</p></div></div>
+            <ol class="guide-steps">
+              <li><strong>All active</strong> calculates a route for every eligible accepted contract. <strong>Contracts</strong> opens a checklist when you want only selected contracts.</li>
+              <li>Read the numbered stop cards from top to bottom. Each card shows its system, pickup or drop-off actions, commodities, SCU, and the QT leg to the following stop.</li>
+              <li>The Summary shows total quantum distance, cargo, stops, contract count, start location, final location, and known expected payout.</li>
+              <li>Choose <strong>Edit</strong> to add start, intermediate, or final waypoints, remove stops, or drag stops into a custom order. After a change, either <strong>Reoptimize route</strong> or <strong>Confirm route</strong>.</li>
+              <li>An <strong>outdated</strong> label means cargo or contract inputs changed after calculation. Recalculate when you want a fresh optimized route.</li>
+              <li>After calculating a route, use <strong>Overlay</strong> in the Route Planner header for the compact flight view. It shows the active waypoint, system and QT to that waypoint, current cargo actions, next stop, and total remaining QT distance.</li>
+            </ol>
+            <figure class="guide-figure"><button class="guide-image-button" type="button" data-guide-image="/assets/help/route_planner.png" data-guide-caption="Calculated Route Planner with numbered cargo stops, QT legs, summary totals, start and final locations, and an outdated-state indicator."><img src="/assets/help/route_planner.png" alt="SCHT calculated Route Planner" loading="lazy"></button><figcaption>The calculated route is the source order for both compact overlays.</figcaption></figure>
+            <div class="guide-media-grid compact">
+              <div class="guide-media-card"><h5>Select contracts</h5><button class="guide-image-button" type="button" data-guide-image="/assets/help/route_contracts.png" data-guide-caption="Route Planner contract selector used to calculate a route from chosen accepted contracts."><img src="/assets/help/route_contracts.png" alt="Route Planner contract selector" loading="lazy"></button><p>Clear a checkbox to exclude that contract from the selected-contract route.</p></div>
+              <div class="guide-media-card"><h5>Route Overlay</h5><button class="guide-image-button" type="button" data-guide-image="/assets/help/route_overlay.png" data-guide-caption="Compact Route Overlay showing the active waypoint, system, QT leg, cargo, next stop, and remaining distance."><img src="/assets/help/route_overlay.png" alt="SCHT Route Overlay" loading="lazy"></button><p>Use Mark all loaded at a pickup when every listed item at the active stop is aboard.</p></div>
+            </div>
+            <figure class="guide-figure"><button class="guide-image-button" type="button" data-guide-image="/assets/help/route_planner_edit.png" data-guide-caption="Route Planner edit mode with removable stops, start, intermediate, and final waypoint controls, plus reoptimization and confirmation actions."><img src="/assets/help/route_planner_edit.png" alt="SCHT Route Planner edit mode" loading="lazy"></button><figcaption>Edit mode preserves deliberate start and final choices while you refine the route.</figcaption></figure>
           </section>
 
           <section class="guide-section" id="guideCorrections">
-            <div class="guide-section-head"><span class="guide-section-number">4</span><div><h4>Review OCR and correct a contract</h4><p>Game.log remains authoritative, but screenshots can fill details the log does not contain.</p></div></div>
+            <div class="guide-section-head"><span class="guide-section-number">5</span><div><h4>Review OCR and correct a contract</h4><p>Game.log remains authoritative, but screenshots can fill details the log does not contain.</p></div></div>
             <ol class="guide-steps">
               <li>When SCHT reports <strong>Contract needs review</strong>, open the pencil icon beside that contract.</li>
               <li>Use <strong>Read screenshot</strong> and select a clear contract screenshot, or paste recognized contract text and choose <strong>Parse text</strong>.</li>
@@ -8463,39 +10400,42 @@ body{font-size:var(--type-ui);font-weight:var(--weight-body)}
               <li><strong>Clear saved</strong> removes only your local correction and lets SCHT return to parsed Game.log/OCR data.</li>
             </ol>
             <div class="guide-note">Manual corrections are tied to the exact MissionId, so two procedurally generated contracts with similar names remain separate.</div>
-            <figure class="guide-figure"><button class="guide-image-button" type="button" data-guide-image="/assets/help/contract_editor.jpg" data-guide-caption="Contract editor with payout, screenshot OCR, text parsing, route rows, shared quantity handling, and save controls."><img src="/assets/help/contract_editor.jpg" alt="SCHT contract editor" loading="lazy"></button><figcaption>Contract editor for OCR review and MissionId-specific corrections.</figcaption></figure>
+            <figure class="guide-figure"><button class="guide-image-button" type="button" data-guide-image="/assets/help/contract_editor.png" data-guide-caption="Contract editor with payout, screenshot OCR, text parsing, pickup and drop-off rows, commodity quantities, and save controls."><img src="/assets/help/contract_editor.png" alt="SCHT contract editor" loading="lazy"></button><figcaption>Contract editor for OCR review and MissionId-specific corrections.</figcaption></figure>
+            <figure class="guide-figure compact"><button class="guide-image-button" type="button" data-guide-image="/assets/help/delete_contract.png" data-guide-caption="Delete confirmation explaining that removal affects only the SCHT tracker and never the Star Citizen contract."><img src="/assets/help/delete_contract.png" alt="SCHT delete contract confirmation" loading="lazy"></button><figcaption>Deletion is local to SCHT. It does not abandon or modify the in-game contract.</figcaption></figure>
           </section>
 
           <section class="guide-section" id="guideMenus">
-            <div class="guide-section-head"><span class="guide-section-number">5</span><div><h4>Share, settings, and data safety</h4><p>Secondary actions are grouped into the icon menus.</p></div></div>
+            <div class="guide-section-head"><span class="guide-section-number">6</span><div><h4>Share, settings, and data safety</h4><p>Secondary actions are grouped into the icon menus.</p></div></div>
             <div class="guide-action-grid">
               <div class="guide-action"><strong>Export as CSV</strong><span>Spreadsheet-friendly contract rows for sorting, calculation, or later analysis.</span></div>
               <div class="guide-action"><strong>Export as HTML</strong><span>A formatted standalone report suitable for viewing or sharing.</span></div>
               <div class="guide-action"><strong>Automatic OCR</strong><span>Keep enabled for normal use. Disable only for troubleshooting or a deliberate manual-entry workflow.</span></div>
+              <div class="guide-action"><strong>Multi-pickup hauling bug fix</strong><span>Keep enabled when the current game build needs known final-details pickup-only workarounds.</span></div>
               <div class="guide-action"><strong>Reset session</strong><span>Clears SCHT contracts, checklist, timer, and saved corrections for the session. The selected Game.log file is not changed.</span></div>
             </div>
             <div class="guide-note danger"><strong>Reset session is destructive inside SCHT.</strong> Use it only when you intentionally want a clean tracker session; a confirmation appears before anything is cleared.</div>
             <div class="guide-media-grid compact">
-              <div class="guide-media-card"><h5>Settings</h5><button class="guide-image-button" type="button" data-guide-image="/assets/help/settings_menu.jpg" data-guide-caption="Settings menu with Automatic OCR and Reset session."><img src="/assets/help/settings_menu.jpg" alt="SCHT settings menu" loading="lazy"></button></div>
+              <div class="guide-media-card"><h5>Settings</h5><button class="guide-image-button" type="button" data-guide-image="/assets/help/settings_menu.png" data-guide-caption="Settings menu with Automatic OCR, the multi-pickup hauling workaround, and Reset session."><img src="/assets/help/settings_menu.png" alt="SCHT settings menu" loading="lazy"></button></div>
               <div class="guide-media-card"><h5>Share</h5><button class="guide-image-button" type="button" data-guide-image="/assets/help/share_menu.jpg" data-guide-caption="Share menu with CSV and HTML export choices."><img src="/assets/help/share_menu.jpg" alt="SCHT share menu" loading="lazy"></button></div>
             </div>
           </section>
 
           <section class="guide-section" id="guideTroubleshooting">
-            <div class="guide-section-head"><span class="guide-section-number">6</span><div><h4>Quick troubleshooting</h4><p>Try the smallest corrective step before resetting the session.</p></div></div>
+            <div class="guide-section-head"><span class="guide-section-number">7</span><div><h4>Quick troubleshooting</h4><p>Try the smallest corrective step before resetting the session.</p></div></div>
             <div class="guide-troubleshooting">
               <div class="guide-trouble"><strong>No contracts appear</strong><p>Verify the Game.log path, select the correct file with Choose Log, click Scan Log, then start live Watch.</p></div>
               <div class="guide-trouble"><strong>Automatic OCR did not run</strong><p>Confirm it is enabled, Star Citizen is the foreground app, and the accepted contract page stayed open during capture.</p></div>
               <div class="guide-trouble"><strong>OCR is incomplete or wrong</strong><p>Open the contract editor, use a clear full contract screenshot, review every route row, and save only verified values.</p></div>
               <div class="guide-trouble"><strong>Export seems inactive</strong><p>Choose CSV or HTML from Share, select a save location in the desktop dialog, and check the SCHT notification for success or an error.</p></div>
-              <div class="guide-trouble"><strong>Overlay will not move or resize</strong><p>Open the overlay gear menu and turn off Lock size or Lock position as required.</p></div>
+              <div class="guide-trouble"><strong>Overlay will not move or resize</strong><p>Use the titlebar pin to unlock its position. Open the gear menu and turn off Lock size before resizing from a window edge.</p></div>
+              <div class="guide-trouble"><strong>Route is outdated</strong><p>Contract or cargo inputs changed after calculation. Choose All active or Contracts again to calculate a fresh optimized route.</p></div>
               <div class="guide-trouble"><strong>Tracker data looks stale</strong><p>Use Scan Log first. Reset session is the last resort because it clears local checklist and correction state.</p></div>
             </div>
           </section>
         </main>
       </div>
     </div>
-    <footer class="info-footer"><small id="infoVersion">SCHT v1.5.67</small><button class="btn primary" id="infoDone" type="button">Close</button></footer>
+    <footer class="info-footer"><small id="infoVersion">SCHT v1.6.0</small><button class="btn primary" id="infoDone" type="button">Close</button></footer>
     <div class="guide-lightbox" id="guideLightbox" aria-hidden="true"><button class="guide-lightbox-close" id="guideLightboxClose" type="button" aria-label="Close enlarged image"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false"><path d="M3 3l10 10M13 3L3 13"/></svg></button><div class="guide-lightbox-frame"><img id="guideLightboxImage" alt=""><p id="guideLightboxCaption"></p></div></div>
   </section>
 </div>
@@ -8503,6 +10443,7 @@ body{font-size:var(--type-ui);font-weight:var(--weight-body)}
 <script>
 const $=id=>document.getElementById(id);
 const esc=s=>(s??"").toString().replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+function locationMarkup(info,fallback=''){const name=info?.name||fallback||'â€”',subtitle=info?.subtitle||'',unresolved=info?.match==='unresolved';return `<span class="location-stack${unresolved?' unresolved-location':''}"><span class="location-name">${esc(name)}</span>${subtitle?`<small class="location-subtitle">${esc(subtitle)}</small>`:''}</span>`}
 const clsStatus=s=>{s=(s||'').toLowerCase();if(s.includes('complete'))return'completed';if(s.includes('abandon')||s.includes('fail')||s.includes('cancel'))return'abandoned';if(s.includes('accept'))return'accepted';return''};
 const STATUS_SVGS=Object.freeze({
   completed:`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true" focusable="false"><!--!Font Awesome Free v7.3.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free Copyright 2026 Fonticons, Inc.--><path d="M480 96C515.3 96 544 124.7 544 160L544 480C544 515.3 515.3 544 480 544L160 544C124.7 544 96 515.3 96 480L96 160C96 124.7 124.7 96 160 96L480 96zM438 209.7C427.3 201.9 412.3 204.3 404.5 215L285.1 379.2L233 327.1C223.6 317.7 208.4 317.7 199.1 327.1C189.8 336.5 189.7 351.7 199.1 361L271.1 433C276.1 438 283 440.5 289.9 440C296.8 439.5 303.3 435.9 307.4 430.2L443.3 243.2C451.1 232.5 448.7 217.5 438 209.7z"/></svg>`,
@@ -8510,14 +10451,15 @@ const STATUS_SVGS=Object.freeze({
   denied:`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true" focusable="false"><!--!Font Awesome Free v7.3.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free Copyright 2026 Fonticons, Inc.--><path d="M160 96C124.7 96 96 124.7 96 160L96 480C96 515.3 124.7 544 160 544L480 544C515.3 544 544 515.3 544 480L544 160C544 124.7 515.3 96 480 96L160 96zM231 231C240.4 221.6 255.6 221.6 264.9 231L319.9 286L374.9 231C384.3 221.6 399.5 221.6 408.8 231C418.1 240.4 418.2 255.6 408.8 264.9L353.8 319.9L408.8 374.9C418.2 384.3 418.2 399.5 408.8 408.8C399.4 418.1 384.2 418.2 374.9 408.8L319.9 353.8L264.9 408.8C255.5 418.2 240.3 418.2 231 408.8C221.7 399.4 221.6 384.2 231 374.9L286 319.9L231 264.9C221.6 255.5 221.6 240.3 231 231z"/></svg>`
 });
 const LOCATION_SVGS=Object.freeze({
-  pickup:`<svg class="route-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true" focusable="false"><!--!Font Awesome Free v7.3.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free Copyright 2026 Fonticons, Inc.--><path d="M342.6 73.4C330.1 60.9 309.8 60.9 297.3 73.4L137.3 233.4C124.8 245.9 124.8 266.2 137.3 278.7C149.8 291.2 170.1 291.2 182.6 278.7L288 173.3L288 544C288 561.7 302.3 576 320 576C337.7 576 352 561.7 352 544L352 173.3L457.4 278.7C469.9 291.2 490.2 291.2 502.7 278.7C515.2 266.2 515.2 245.9 502.7 233.4L342.7 73.4z"/></svg>`,
-  dropoff:`<svg class="route-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true" focusable="false"><!--!Font Awesome Free v7.3.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free Copyright 2026 Fonticons, Inc.--><path d="M297.4 566.6C309.9 579.1 330.2 579.1 342.7 566.6L502.7 406.6C515.2 394.1 515.2 373.8 502.7 361.3C490.2 348.8 469.9 348.8 457.4 361.3L352 466.7L352 96C352 78.3 337.7 64 320 64C302.3 64 288 78.3 288 96L288 466.7L182.6 361.3C170.1 348.8 149.8 348.8 137.3 361.3C124.8 373.8 124.8 394.1 137.3 406.6L297.3 566.6z"/></svg>`
+  pickup:`<svg class="route-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true" focusable="false"><!--!Font Awesome Free v7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free Copyright 2026 Fonticons, Inc.--><path d="M342.6 105.4C330.1 92.9 309.8 92.9 297.3 105.4L137.3 265.4C124.8 277.9 124.8 298.2 137.3 310.7C149.8 323.2 170.1 323.2 182.6 310.7L320 173.3L457.4 310.6C469.9 323.1 490.2 323.1 502.7 310.6C515.2 298.1 515.2 277.8 502.7 265.3L342.7 105.3zM502.6 457.4L342.6 297.4C330.1 284.9 309.8 284.9 297.3 297.4L137.3 457.4C124.8 469.9 124.8 490.2 137.3 502.7C149.8 515.2 170.1 515.2 182.6 502.7L320 365.3L457.4 502.6C469.9 515.1 490.2 515.1 502.7 502.6C515.2 490.1 515.2 469.8 502.7 457.3z"/></svg>`,
+  dropoff:`<svg class="route-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true" focusable="false"><!--!Font Awesome Free v7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free Copyright 2026 Fonticons, Inc.--><path d="M342.6 534.6C330.1 547.1 309.8 547.1 297.3 534.6L137.3 374.6C124.8 362.1 124.8 341.8 137.3 329.3C149.8 316.8 170.1 316.8 182.6 329.3L320 466.7L457.4 329.4C469.9 316.9 490.2 316.9 502.7 329.4C515.2 341.9 515.2 362.2 502.7 374.7L342.7 534.7zM502.6 182.6L342.6 342.6C330.1 355.1 309.8 355.1 297.3 342.6L137.3 182.6C124.8 170.1 124.8 149.8 137.3 137.3C149.8 124.8 170.1 124.8 182.6 137.3L320 274.7L457.4 137.4C469.9 124.9 490.2 124.9 502.7 137.4C515.2 149.9 515.2 170.2 502.7 182.7z"/></svg>`
 });
 const EDIT_CONTRACT_SVG=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true" focusable="false"><path d="M535.6 85.7C513.7 63.8 478.3 63.8 456.4 85.7L432 110.1L529.9 208L554.3 183.6C576.2 161.7 576.2 126.3 554.3 104.4L535.6 85.7zM236.4 305.7C230.3 311.8 225.6 319.3 222.9 327.6L193.3 416.4C190.4 425 192.7 434.5 199.1 441C205.5 447.5 215 449.7 223.7 446.8L312.5 417.2C320.7 414.5 328.2 409.8 334.4 403.7L496 241.9L398.1 144L236.4 305.7zM160 128C107 128 64 171 64 224L64 480C64 533 107 576 160 576L416 576C469 576 512 533 512 480L512 384C512 366.3 497.7 352 480 352C462.3 352 448 366.3 448 384L448 480C448 497.7 433.7 512 416 512L160 512C142.3 512 128 497.7 128 480L128 224C128 206.3 142.3 192 160 192L256 192C273.7 192 288 177.7 288 160C288 142.3 273.7 128 256 128L160 128z"/></svg>`;
 const DELETE_CONTRACT_SVG=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true" focusable="false"><path d="M232.7 69.9L224 96L128 96C110.3 96 96 110.3 96 128C96 145.7 110.3 160 128 160L512 160C529.7 160 544 145.7 544 128C544 110.3 529.7 96 512 96L416 96L407.3 69.9C402.9 56.8 390.7 48 376.9 48L263.1 48C249.3 48 237.1 56.8 232.7 69.9zM512 208L128 208L149.1 531.1C150.7 556.4 171.7 576 197 576L443 576C468.3 576 489.3 556.4 490.9 531.1L512 208z"/></svg>`;
 const statusIcon=s=>{s=(s||'').toUpperCase();if(s==='COMPLETED')return STATUS_SVGS.completed;if(['ABANDONED','FAILED','CANCELLED','DENIED','REJECTED'].includes(s))return STATUS_SVGS.denied;if(s==='ACCEPTED')return STATUS_SVGS.accepted;return STATUS_SVGS.accepted};
 const statusSubline=(status,count)=>{status=(status||'').toUpperCase();const cargo=count===1?'1 cargo row':count+' cargo rows';if(status==='COMPLETED')return cargo+' · paid';if(['ABANDONED','FAILED','CANCELLED','DENIED','REJECTED'].includes(status))return cargo+' · closed';return cargo+' · active'};
-let cache=null,refreshing=false,busy=false,toastTimer=null,editorGroup=null,editorContractedBy='',deleteMissionId='',deleteReturnFocus=null,resetReturnFocus=null,infoReturnFocus=null,guideImageReturnFocus=null;
+let cache=null,refreshing=false,busy=false,toastTimer=null,editorGroup=null,editorContractedBy='',editorPrimaryPickups=[],deleteMissionId='',deleteReturnFocus=null,resetReturnFocus=null,infoReturnFocus=null,guideImageReturnFocus=null,locationSuggestionSignature='',editorLocationOptions=[],editorLocationLoad=null;
+$('autoOcrBtn')?.insertAdjacentHTML('afterend','<button class="dropdown-item" id="multiPickupDefaultBtn" type="button" role="menuitem" data-action="toggle_multi_pickup_bug_default" aria-pressed="false" title="When enabled for matching contracts, only the final pickup listed in the Details section is used operationally. Original locations remain stored."><span><strong>Multi-pickup hauling bug fix</strong><small>Known mission bug workarounds · final Details pickup only</small></span><span class="setting-toggle" id="multiPickupDefaultToggle" aria-hidden="true"></span></button>');
 const CONTRACT_FILTER_KEY='sc-hauling-contract-filter-v1';
 const HIDE_LOADED_KEY='sc-hauling-hide-loaded-v1';
 let contractFilter=(()=>{try{return localStorage.getItem(CONTRACT_FILTER_KEY)||'all'}catch(_e){return'all'}})();
@@ -8536,7 +10478,7 @@ function setSettingsMenu(open,focusFirst=false){const menu=$('settingsMenu'),but
 function closeTopMenus(){setShareMenu(false);setSettingsMenu(false)}
 function openGuideImage(button){if(!button)return;guideImageReturnFocus=button;const src=button.dataset.guideImage||button.querySelector('img')?.src||'';const caption=button.dataset.guideCaption||button.querySelector('img')?.alt||'SCHT guide image';$('guideLightboxImage').src=src;$('guideLightboxImage').alt=caption;$('guideLightboxCaption').textContent=caption;const viewer=$('guideLightbox');viewer.classList.add('open');viewer.setAttribute('aria-hidden','false');setTimeout(()=>$('guideLightboxClose').focus(),0)}
 function closeGuideImage(restoreFocus=true){const viewer=$('guideLightbox');viewer.classList.remove('open');viewer.setAttribute('aria-hidden','true');$('guideLightboxImage').removeAttribute('src');const focusTarget=guideImageReturnFocus;guideImageReturnFocus=null;if(restoreFocus&&focusTarget&&document.contains(focusTarget))setTimeout(()=>focusTarget.focus(),0)}
-function openInfoWindow(){closeTopMenus();infoReturnFocus=document.activeElement;const version=cache?.version||'1.5.67';$('infoVersion').textContent='SCHT v'+version;const modal=$('infoModal');modal.classList.add('open');modal.setAttribute('aria-hidden','false');$('infoBody').scrollTop=0;setTimeout(()=>$('guideQuickStartLink').focus(),0)}
+function openInfoWindow(){closeTopMenus();infoReturnFocus=document.activeElement;const version=cache?.version||'1.6.0';$('infoVersion').textContent='SCHT v'+version;const modal=$('infoModal');modal.classList.add('open');modal.setAttribute('aria-hidden','false');$('infoBody').scrollTop=0;setTimeout(()=>$('guideQuickStartLink').focus(),0)}
 function closeInfoWindow(){if($('guideLightbox').classList.contains('open'))closeGuideImage(false);const modal=$('infoModal');modal.classList.remove('open');modal.setAttribute('aria-hidden','true');const focusTarget=infoReturnFocus;infoReturnFocus=null;if(focusTarget&&document.contains(focusTarget))setTimeout(()=>focusTarget.focus(),0)}
 function setBusy(value){busy=value;document.querySelectorAll('[data-action]').forEach(b=>b.disabled=value)}
 async function action(name){if(busy)return;setBusy(true);try{const path=$('logPath').value;const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:name,log_path:path})});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'Action failed');render(j.state||await fetchState())}catch(e){showToast(e.message||String(e),'error')}finally{setBusy(false);if(cache)updateControls(cache)}}
@@ -8561,6 +10503,9 @@ function setDesktopBridgeReady(ready,mode='none'){
   overlay.disabled=!desktopBridgeReady;
   overlay.textContent=desktopBridgeReady?'Open overlay':'Desktop only';
   overlay.title=desktopBridgeReady?'Open the always-on-top loading overlay':'Start the standalone desktop app to use the overlay';
+  const routeOverlay=$('openRouteOverlayBtn');
+  routeOverlay.disabled=!desktopBridgeReady;
+  routeOverlay.title=desktopBridgeReady?'Open the compact Route Planner overlay':'Start the standalone desktop app to use the route overlay';
   document.querySelectorAll('.main-window-btn').forEach(button=>button.disabled=!desktopBridgeReady);
   if(cache)$('version').textContent='v'+cache.version+(desktopBridgeReady?'':' · diagnostic browser');
   if(desktopBridgeReady)setTimeout(refreshMainWindowStatus,0);
@@ -8667,6 +10612,64 @@ window.addEventListener('resize',()=>{applyContractLogHeight($('contractPanel')?
 function statusMatchesFilter(group){const status=String(group.status||'').toUpperCase();if(contractFilter==='active')return status==='ACCEPTED';if(contractFilter==='completed')return status==='COMPLETED';if(contractFilter==='closed')return ['ABANDONED','FAILED','CANCELLED','DENIED','REJECTED'].includes(status);return true}
 function updateFilterButtons(){document.querySelectorAll('.filter-btn[data-filter]').forEach(button=>button.classList.toggle('active',(button.dataset.filter||'all')===contractFilter))}
 function updateControls(data){if(busy)return;const watching=!!data.watching;const watch=$('watchBtn');watch.disabled=false;watch.dataset.action=watching?'stop_watch':'watch';watch.textContent=watching?'Stop Watch':'Start Watch';watch.title=watching?'Stop monitoring Game.log':'Start monitoring Game.log for new contract events';watch.classList.toggle('primary',!watching);watch.classList.toggle('red',watching);watch.classList.toggle('active',watching);const auto=!!data.ocr?.auto_enabled;const autoButton=$('autoOcrBtn');autoButton.setAttribute('aria-pressed',auto?'true':'false');autoButton.title='Auto OCR '+(auto?'on':'off')+' · '+(data.ocr?.status||'');$('autoOcrToggle').classList.toggle('on',auto);$('autoOcrHelp').textContent=auto?'Enabled · capture newly accepted contracts automatically':'Disabled · add screenshots from the contract editor when needed';$('timerToggle').textContent=data.timer_state==='running'?'Pause':data.timer_state==='paused'?'Resume':'Pause / Play'}
+function updateWorkaroundControl(data){const enabled=!!data.workarounds?.multi_pickup_bug_default;$('multiPickupDefaultBtn')?.setAttribute('aria-pressed',enabled?'true':'false');$('multiPickupDefaultToggle')?.classList.toggle('on',enabled)}
+function compactRouteDistance(value,unit='km'){
+  if(value==null||!Number.isFinite(Number(value)))return'—';const n=Number(value),absolute=Math.abs(n);let shown='';
+  if(absolute>=1e9)shown=(n/1e9).toFixed(1).replace(/\.0$/,'')+'b';else if(absolute>=1e6)shown=(n/1e6).toFixed(1).replace(/\.0$/,'')+'m';else if(absolute>=1e3)shown=Math.round(n).toLocaleString();else shown=n.toLocaleString(undefined,{maximumFractionDigits:1});
+  return `${shown} ${unit}`;
+}
+function preciseRouteDistance(value,unit='km'){return value==null?'Distance unavailable':`${Number(value).toLocaleString(undefined,{maximumFractionDigits:1})} ${unit}`}
+function quantumRouteDistance(value){const distanceKm=Math.max(0,Number(value)||0);if(distanceKm>=1e6)return`${Math.ceil(distanceKm/1e6)} Gm`;if(distanceKm>=1e3)return`${Math.ceil(distanceKm/1e3)} Mm`;return`${Math.ceil(distanceKm)} km`}
+function routeStopCommodity(op,kind){const amount=op.shared_quantity&&kind==='pickup'?'SCU not split':`${esc(op.scu)} SCU`;return`<span class="route-stop-commodity ${kind}" style="--cargo-color:${commodityBoxColor(op.commodity)}" title="${kind==='pickup'?'Pick up':'Drop off'} ${esc(op.commodity)}"><i>${CARGO_BOX_SVG}</i><span>${esc(op.commodity)}</span><b>${amount}</b></span>`}
+function routeStopIsComplete(stop,data){const pickups=stop.pickups||[],deliveries=stop.deliveries||[],checklist=data.checklist||{},loadedMembers=new Set(data.loaded_member_identities||[]),completedContracts=new Set((data.groups||[]).filter(group=>String(group.status||'').toUpperCase()==='COMPLETED').map(group=>String(group.mission_id||'').toLowerCase())),pickupsComplete=!pickups.length||pickups.every(operation=>{const member=String(operation.member_identity||'');if(member&&loadedMembers.has(member))return true;const ids=operation.checklist_ids||[];return ids.length>0&&ids.every(id=>!!checklist[id])}),deliveriesComplete=!deliveries.length||deliveries.every(operation=>completedContracts.has(String(operation.contract_id||'').toLowerCase()));return(pickups.length>0||deliveries.length>0)&&pickupsComplete&&deliveriesComplete}
+let routeCustomMode=false;
+const ROUTE_PLUS_SVG='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" aria-hidden="true" focusable="false"><path d="M352 128C352 110.3 337.7 96 320 96C302.3 96 288 110.3 288 128L288 288L128 288C110.3 288 96 302.3 96 320C96 337.7 110.3 352 128 352L288 352L288 512C288 529.7 302.3 544 320 544C337.7 544 352 529.7 352 512L352 352L512 352C529.7 352 544 337.7 544 320C544 302.3 529.7 288 512 288L352 288L352 128z"/></svg>';
+function routeLocationPicker(kind,label,afterStopId=''){return`<div class="route-inline-insert ${kind==='between'?'connector':kind}"><button type="button" class="route-add-waypoint-button" data-route-picker-open aria-expanded="false">${ROUTE_PLUS_SVG}<span>${esc(label)}</span></button><div class="route-inline-popover" data-route-picker-kind="${esc(kind)}" data-after-stop-id="${esc(afterStopId)}" hidden><div class="route-inline-popover-row"><div class="location-combobox"><input class="route-location-input" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" placeholder="Start typing a location"><div class="location-autocomplete" role="listbox" hidden></div></div><button type="button" class="btn" data-route-picker-confirm>Add</button></div></div></div>`}
+function closeRouteLocationPickers(except=null){$('routeStops').querySelectorAll('.route-inline-popover').forEach(popover=>{if(popover===except)return;popover.hidden=true;const wrapper=popover.parentElement,button=wrapper?.querySelector('[data-route-picker-open]'),input=popover.querySelector('input'),menu=popover.querySelector('.location-autocomplete');wrapper?.classList.remove('editing');button?.setAttribute('aria-expanded','false');input?.setAttribute('aria-expanded','false');if(menu){menu.hidden=true;menu.innerHTML=''}})}
+function hideRouteLocationMenu(input){const menu=input.closest('.location-combobox').querySelector('.location-autocomplete');menu.hidden=true;menu.innerHTML='';input.setAttribute('aria-expanded','false')}
+function showRouteLocationMenu(input){const query=input.value.trim();if(!query){hideRouteLocationMenu(input);return}const popover=input.closest('.route-inline-popover'),menu=popover.querySelector('.location-autocomplete'),panel=$('routePlannerPanel');const matches=editorLocationMatches(query);menu.innerHTML=matches.length?matches.map(option=>`<button type="button" class="location-option" role="option" data-location-id="${esc(option.id)}"><strong>${esc(option.name)}</strong><small>${esc(option.subtitle||option.system||'Location')}</small></button>`).join(''):'<div class="location-empty-option">No matching catalog locations</div>';const boxRect=input.closest('.location-combobox').getBoundingClientRect(),panelRect=panel.getBoundingClientRect(),below=Math.max(0,panelRect.bottom-boxRect.bottom-7),above=Math.max(0,boxRect.top-panelRect.top-7),openUp=below<150&&above>below;menu.classList.toggle('open-up',openUp);menu.style.maxHeight=`${Math.max(72,Math.min(230,openUp?above:below))}px`;menu.hidden=false;input.setAttribute('aria-expanded','true')}
+function chooseRouteLocation(input,locationId){const option=editorLocationOptions.find(item=>item.id===locationId);if(!option)return;input.value=option.qualified_name||`${option.name}${option.subtitle?` — ${option.subtitle}`:''}`;input.dataset.locationId=option.id;hideRouteLocationMenu(input)}
+function renderRoutePlanner(data){
+  const active=(data.groups||[]).filter(g=>g.status==='ACCEPTED'&&g.mission_id),route=data.route||{},stops=route.stops||[];
+  const preset=route.preset||'',scope=route.scope==='selected'?'selected':'all',allButton=document.querySelector('[data-route-scope="all"]'),contractsButton=$('routeContractsBtn'),customButton=$('routeCustomBtn'),editButton=$('editRouteBtn');routeCustomMode=preset==='custom_draft';allButton.classList.toggle('active',route.valid&&preset==='all');contractsButton.classList.toggle('active',route.valid&&preset==='selected');customButton.classList.toggle('active',route.valid&&preset==='custom');customButton.disabled=!route.custom_available;editButton.classList.toggle('active',route.valid&&routeCustomMode);$('routeCustomTools').hidden=!routeCustomMode||!route.valid;const manuallyEdited=routeCustomMode&&!!route.dirty;$('routeReoptimizeBtn').disabled=!manuallyEdited;$('routeConfirmBtn').disabled=!manuallyEdited;$('routeReoptimizeTitle').textContent=manuallyEdited?'Custom route edited':'Route unchanged';$('routeReoptimizeHint').textContent=manuallyEdited?'Custom changes may no longer be the shortest route. Reoptimize it or confirm the current order.':'Reoptimize and Confirm become available after you manually edit the route.';
+  const selected=new Set(route.selected_contracts||[]);if(!$('routeContracts').matches(':focus-within'))$('routeContracts').innerHTML=active.length?active.map(g=>`<label class="route-contract"><input type="checkbox" value="${esc(g.mission_id)}" ${(scope==='all'||selected.has(String(g.mission_id).toLowerCase()))?'checked':''}> <span>${esc(g.mission)} · ${(g.objectives||[]).length} route${(g.objectives||[]).length===1?'':'s'}</span></label>`).join(''):'<div class="route-empty">No eligible active contracts.</div>';
+  const waypoints=route.waypoints||[];$('routeWaypointLabel').textContent=`Extra locations · ${waypoints.length}`;$('routeWaypoints').innerHTML=waypoints.map(point=>`<span class="route-waypoint" title="${esc(point.subtitle||point.name)}"><span>${esc(point.name)}</span><button type="button" data-remove-waypoint="${esc(point.id)}" aria-label="Remove ${esc(point.name)}">×</button></span>`).join('')||'<small style="color:var(--muted);font-size:8px">No extra locations added</small>';
+  const locations=[...(data.location_suggestions||[])];active.forEach(g=>(g.original_objectives||[]).forEach(o=>[o.pickup,o.dropoff].forEach(v=>{if(v&&!locations.includes(v))locations.push(v)})));const suggestionSignature=locations.join('\n');if(suggestionSignature!==locationSuggestionSignature){locationSuggestionSignature=suggestionSignature;$('routeLocationSuggestions').innerHTML=locations.map(v=>`<option value="${esc(v)}"></option>`).join('')}
+  const summary=[];if(route.valid){summary.push(`${stops.length} stops`,`${route.contract_count||0} contracts`,route.exact?'shortest route':'optimized route')}else summary.push(route.error||'No route calculated');if(route.outdated)summary.push('outdated');$('routeSummary').textContent=summary.join(' · ');
+  $('routeSummaryDistance').textContent=route.valid?quantumRouteDistance(route.total_distance):'—';$('routeSummaryCargo').textContent=route.valid?`${Number(route.total_cargo||0).toLocaleString()} SCU`:'—';$('routeSummaryStops').textContent=route.valid?String(stops.length):'—';$('routeSummaryContracts').textContent=route.valid?String(route.contract_count||0):'—';$('routeSummaryStart').textContent=route.valid&&stops.length?stops[0].location:'—';$('routeSummaryFinal').textContent=route.valid&&stops.length?stops[stops.length-1].location:'—';const knownPayouts=Number(route.known_payout_count||0),unknownPayouts=Number(route.unknown_payout_count||0),expectedPayout=Number(route.expected_payout||0);$('routeSummaryPayout').textContent=route.valid&&knownPayouts?`${expectedPayout.toLocaleString()}${unknownPayouts?'+':''} aUEC`:route.valid?'Unknown':'—';$('routeSummaryPayoutNote').textContent=route.valid?(unknownPayouts?`${unknownPayouts} contract payout${unknownPayouts===1?'':'s'} unknown`:'All contract payouts included'):'Selected contracts';
+  $('routeRemoveBtn').disabled=!route.valid&&!waypoints.length&&!routeCustomMode;
+  if(routeCustomMode&&route.valid&&$('routeStops').querySelector('.route-inline-popover:not([hidden])'))return;
+  if(!route.valid){const unresolved=route.unresolved_locations||[];const mappings=unresolved.length?`<div class="route-resolutions">${unresolved.map((name,index)=>`<div class="route-resolution"><strong title="${esc(name)}">${esc(name)}</strong><input id="routeResolve${index}" list="routeLocationSuggestions" placeholder="Choose real location"><button class="btn" type="button" data-route-resolve="${esc(name)}" data-route-input="routeResolve${index}">Use location</button></div>`).join('')}</div>`:'';$('routeStops').innerHTML=`<div class="route-empty">${esc(route.error||'No route calculated.')}${(route.warnings||[]).map(w=>`<p class="bug-notice">${esc(w)}</p>`).join('')}${mappings}</div>`;return}
+  let completedPrefixCount=0;for(const stop of stops){if(!!stop.historical||routeStopIsComplete(stop,data))completedPrefixCount+=1;else break}
+  const cards=stops.map((stop,index)=>{const pickups=stop.pickups||[],deliveries=stop.deliveries||[],stopComplete=!!stop.historical||routeStopIsComplete(stop,data),editable=routeCustomMode&&!stopComplete,draggable=editable,badges=[pickups.length?`<span class="route-stop-action pickup">${LOCATION_SVGS.pickup}<span>Pick up</span></span>`:'',deliveries.length?`<span class="route-stop-action dropoff">${LOCATION_SVGS.dropoff}<span>Drop off</span></span>`:'',stop.user_waypoint?'<span class="route-stop-action waypoint"><svg class="route-icon" viewBox="0 0 640 640" aria-hidden="true"><path d="M128 252.6C128 148.4 214 64 320 64C426 64 512 148.4 512 252.6C512 371.9 391.8 514.9 341.6 569.4C329.8 582.2 310.1 582.2 298.3 569.4C248.1 514.9 127.9 371.9 127.9 252.6zM320 320C355.3 320 384 291.3 384 256C384 220.7 355.3 192 320 192C284.7 192 256 220.7 256 256C256 291.3 284.7 320 320 320z"/></svg><span>User WP</span></span>':''].join(''),commodityCount=pickups.length+deliveries.length,commodities=[...pickups.map(op=>routeStopCommodity(op,'pickup')),...deliveries.map(op=>routeStopCommodity(op,'dropoff'))].join(''),waypointNote='<span class="route-user-waypoint-note"><strong>Personal stop</strong><small>No cargo action at this waypoint</small></span>',deleteControl=editable?`<button type="button" class="route-stop-delete" data-route-stop-delete="${esc(stop.stop_id||'')}" title="Delete waypoint" aria-label="Delete ${esc(stop.location)} waypoint"><svg viewBox="0 0 640 640" aria-hidden="true"><path d="M232.7 69.9L224 96L128 96C110.3 96 96 110.3 96 128C96 145.7 110.3 160 128 160L512 160C529.7 160 544 145.7 544 128C544 110.3 529.7 96 512 96L416 96L407.3 69.9C402.9 56.8 390.7 48 376.9 48L263.1 48C249.3 48 237.1 56.8 232.7 69.9zM512 208L128 208L149.1 531.1C150.7 556.4 171.7 576 197 576L443 576C468.3 576 489.3 556.4 490.9 531.1L512 208z"/></svg></button>`:'',legDistance=index===0?0:stop.distance_from_previous,distance=quantumRouteDistance(legDistance),canInsert=index>=completedPrefixCount,insertControl=routeCustomMode&&canInsert?routeLocationPicker('between','Add Waypoint',stops[index-1]?.stop_id||''):'',connector=index?`<div class="route-stop-connector"><span class="route-connector-distance"><small>QT</small><strong>${distance}</strong></span>${insertControl}</div>`:'';return`${connector}<article data-route-stop-id="${esc(stop.stop_id||'')}" ${draggable?'draggable="true"':''} class="route-stop${index===0?' start-stop':''}${stop.user_waypoint?' user-waypoint':''}${stopComplete?' complete-stop':''}${draggable?' route-draggable':''}${editable?' editable-stop':''}"><div class="route-stop-heading"><span class="route-stop-number">${stop.number}</span><div class="route-stop-location"><h4>${esc(stop.location)}</h4>${stop.parent_body?`<small class="location-subtitle">${esc(stop.parent_body)}</small>`:''}</div></div><span class="route-stop-distance" title="${preciseRouteDistance(legDistance,route.distance_unit||'km')}"><small>QT</small><strong>${distance}</strong></span><div class="route-stop-badges">${badges}</div><div class="route-stop-commodities${commodityCount===1?' single':''}${stop.user_waypoint&&commodityCount===0?' waypoint-only':''}">${commodities||waypointNote}</div>${deleteControl}</article>`}).join('');
+  $('routeStops').innerHTML=routeCustomMode?`${routeLocationPicker('start','Add Start Waypoint')}${cards||'<div class="route-empty">No remaining operations.</div>'}${routeLocationPicker('end','Add Final Waypoint')}`:(cards||'<div class="route-empty">No remaining operations.</div>');
+}
+function routeScopeValue(){if($('routeContractsBtn').classList.contains('active'))return'selected';return routeCustomMode?(cache?.route?.source_scope||cache?.route?.scope||'all'):'all'}
+function selectedRouteContracts(){if(routeScopeValue()==='all')return cache?.route?.selected_contracts||[];return[...$('routeContracts').querySelectorAll('input:checked')].map(input=>input.value)}
+async function routeAction(payload){const r=await fetch('/api/route',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'Route action failed');render(j.state);return j}
+async function optimizeRoute(silent=false,force=false){clearTimeout(routeInvalidateTimer);routeInvalidateTimer=null;const selected=selectedRouteContracts();setBusy(true);try{const j=await routeAction({action:'optimize',scope:routeScopeValue(),selected_contracts:selected,force});if(!silent||!j.route.valid)showToast(j.route.valid?(force?'Remaining route reoptimized.':'Route calculated.'):j.route.error,j.route.valid?'success':'error')}catch(e){showToast(e.message||String(e),'error')}finally{setBusy(false)}}
+$('routeStops').addEventListener('click',async event=>{const button=event.target.closest('[data-route-resolve]');if(!button)return;const input=$(button.dataset.routeInput),canonical=input?.value.trim()||'';if(!canonical){showToast('Choose the real location first.','error');return}setBusy(true);try{const r=await fetch('/api/route',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'resolve_location',captured_name:button.dataset.routeResolve,canonical_name:canonical})}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'Location mapping failed');showToast('Location mapping saved.','success')}catch(e){showToast(e.message||String(e),'error');setBusy(false);return}setBusy(false);await optimizeRoute()});
+document.querySelector('[data-route-scope="all"]').addEventListener('click',async()=>{routeCustomMode=false;$('routeContracts').hidden=true;$('routeContractsBtn').setAttribute('aria-expanded','false');try{const j=await routeAction({action:'activate',preset:'all'});if(!j.route||!j.route.valid||j.route.outdated)await optimizeRoute(true)}catch(e){showToast(e.message||String(e),'error')}});
+$('routeContractsBtn').addEventListener('click',event=>{event.stopPropagation();routeCustomMode=false;const opening=$('routeContracts').hidden;$('routeContracts').hidden=!opening;$('routeContractsBtn').setAttribute('aria-expanded',opening?'true':'false');if(cache)renderRoutePlanner(cache)});
+$('routeCustomBtn').addEventListener('click',async()=>{routeCustomMode=false;$('routeContracts').hidden=true;$('routeContractsBtn').setAttribute('aria-expanded','false');try{await routeAction({action:'activate',preset:'custom'});showToast('Custom route restored.','success')}catch(e){showToast(e.message||String(e),'error')}});
+$('editRouteBtn').addEventListener('click',async()=>{routeCustomMode=true;$('routeContracts').hidden=true;$('routeContractsBtn').setAttribute('aria-expanded','false');try{await routeAction({action:'begin_custom'});showToast('Custom route unlocked. Drag unfinished stops or add route anchors.','info')}catch(e){showToast(e.message||String(e),'error')}});
+$('routeRemoveBtn').addEventListener('click',async()=>{try{const r=await fetch('/api/route',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'clear'})}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'Could not remove route');routeCustomMode=false;$('routeContracts').hidden=true;$('routeContractsBtn').setAttribute('aria-expanded','false');render(j.state);showToast('Route removed.','success')}catch(e){showToast(e.message||String(e),'error')}});
+document.addEventListener('click',event=>{if(!event.target.closest('.route-contract-picker')){$('routeContracts').hidden=true;$('routeContractsBtn').setAttribute('aria-expanded','false')}if(!event.target.closest('.route-inline-insert'))closeRouteLocationPickers()});
+async function addRouteWaypoint(){const location=$('routeWaypointInput').value.trim();if(!location){showToast('Choose a location to add.','error');return}try{const r=await fetch('/api/route',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add_waypoint',location})}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'Could not add waypoint');$('routeWaypointInput').value='';render(j.state);showToast(`${j.waypoint.name} added to the route.`,'success')}catch(e){showToast(e.message||String(e),'error')}}
+$('addRouteWaypointBtn').addEventListener('click',addRouteWaypoint);$('routeWaypointInput').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();addRouteWaypoint()}});
+$('routeWaypoints').addEventListener('click',async event=>{const button=event.target.closest('[data-remove-waypoint]');if(!button)return;try{const r=await fetch('/api/route',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove_waypoint',location_id:button.dataset.removeWaypoint})}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'Could not remove waypoint');render(j.state)}catch(e){showToast(e.message||String(e),'error')}});
+let routeInvalidateTimer=null;function invalidateRouteInputs(){clearTimeout(routeInvalidateTimer);routeInvalidateTimer=setTimeout(async()=>{routeInvalidateTimer=null;try{const r=await fetch('/api/route',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'invalidate',scope:routeScopeValue(),selected_contracts:selectedRouteContracts()})}),j=await r.json();if(r.ok&&j.ok)render(j.state)}catch(_e){}},150)}
+function scheduleRouteOptimization(){clearTimeout(routeInvalidateTimer);routeInvalidateTimer=setTimeout(()=>{routeInvalidateTimer=null;optimizeRoute(true)},180)}
+$('routeContracts').addEventListener('change',()=>{routeCustomMode=false;const inputs=[...$('routeContracts').querySelectorAll('input')],allSelected=inputs.length>0&&inputs.every(input=>input.checked);document.querySelector('[data-route-scope="all"]').classList.toggle('active',allSelected);$('routeContractsBtn').classList.toggle('active',!allSelected);scheduleRouteOptimization()});
+async function submitRouteLocationPicker(popover){const input=popover.querySelector('.route-location-input'),location=input.value.trim(),kind=popover.dataset.routePickerKind,afterStopId=popover.dataset.afterStopId||'';if(!location){showToast('Choose a known location first.','error');input.focus();return}closeRouteLocationPickers();try{if(kind==='start'||kind==='end'){await routeAction({action:'set_endpoint',endpoint:kind,location});showToast(`${kind==='start'?'Start':'Final'} waypoint added.`,'success')}else{await routeAction({action:'add_custom_waypoint',location,after_stop_id:afterStopId});showToast('Waypoint added.','success')}}catch(e){showToast(e.message||String(e),'error')}}
+$('routeStops').addEventListener('click',async event=>{const remove=event.target.closest('[data-route-stop-delete]');if(remove){event.preventDefault();event.stopPropagation();try{await routeAction({action:'remove_custom_stop',stop_id:remove.dataset.routeStopDelete});showToast('Waypoint removed from the draft.','success')}catch(e){showToast(e.message||String(e),'error')}return}const opener=event.target.closest('[data-route-picker-open]');if(opener){event.preventDefault();event.stopPropagation();const wrapper=opener.parentElement,popover=wrapper.querySelector('.route-inline-popover'),opening=popover.hidden;closeRouteLocationPickers(opening?popover:null);popover.hidden=!opening;wrapper.classList.toggle('editing',opening);opener.setAttribute('aria-expanded',opening?'true':'false');if(opening){try{await ensureEditorLocationOptions();const input=popover.querySelector('.route-location-input');input.focus();hideRouteLocationMenu(input)}catch(e){showToast(e.message||String(e),'error')}}return}const option=event.target.closest('.route-inline-popover .location-option');if(option){event.preventDefault();event.stopPropagation();const input=option.closest('.route-inline-popover').querySelector('.route-location-input');chooseRouteLocation(input,option.dataset.locationId);return}const confirm=event.target.closest('[data-route-picker-confirm]');if(confirm){event.preventDefault();event.stopPropagation();await submitRouteLocationPicker(confirm.closest('.route-inline-popover'))}});
+$('routeStops').addEventListener('input',event=>{const input=event.target.closest('.route-location-input');if(!input)return;delete input.dataset.locationId;if(!input.value.trim()){hideRouteLocationMenu(input);return}if(editorLocationOptions.length)showRouteLocationMenu(input)});
+$('routeStops').addEventListener('focusin',async event=>{const input=event.target.closest('.route-location-input');if(!input||!input.value.trim())return;try{await ensureEditorLocationOptions();showRouteLocationMenu(input)}catch(e){showToast(e.message||String(e),'error')}});
+$('routeStops').addEventListener('keydown',async event=>{const input=event.target.closest('.route-location-input');if(!input)return;const menu=input.closest('.location-combobox').querySelector('.location-autocomplete'),options=[...menu.querySelectorAll('.location-option')],current=options.findIndex(option=>option.classList.contains('active'));if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();const next=event.key==='ArrowDown'?Math.min(options.length-1,current+1):Math.max(0,current<0?options.length-1:current-1);options.forEach(option=>option.classList.remove('active'));options[next]?.classList.add('active');options[next]?.scrollIntoView({block:'nearest'})}else if(event.key==='Enter'){event.preventDefault();const active=options.find(option=>option.classList.contains('active'));if(active)chooseRouteLocation(input,active.dataset.locationId);else await submitRouteLocationPicker(input.closest('.route-inline-popover'))}else if(event.key==='Escape'){closeRouteLocationPickers();input.closest('.route-inline-insert').querySelector('[data-route-picker-open]')?.focus()}});
+$('routeReoptimizeBtn').addEventListener('click',async()=>{setBusy(true);try{await routeAction({action:'reoptimize_custom'});showToast('Remaining route reoptimized. Completed history and fixed endpoints were preserved.','success')}catch(e){showToast(e.message||String(e),'error')}finally{setBusy(false)}});
+$('routeConfirmBtn').addEventListener('click',async()=>{setBusy(true);try{await routeAction({action:'confirm_custom'});routeCustomMode=false;showToast('Custom route confirmed and saved.','success')}catch(e){showToast(e.message||String(e),'error')}finally{setBusy(false)}});
+let draggedRouteStop='',routeReorderPending=false;function clearRouteDropTargets(){document.querySelectorAll('.route-drop-target,.route-drop-before,.route-drop-after').forEach(node=>node.classList.remove('route-drop-target','route-drop-before','route-drop-after'))}function routeDropAfter(cards,sourceId,targetId){const sourceIndex=cards.findIndex(card=>card.dataset.routeStopId===sourceId),targetIndex=cards.findIndex(card=>card.dataset.routeStopId===targetId);return sourceIndex>=0&&targetIndex>=0&&sourceIndex<targetIndex}function reorderedRouteStopIds(cards,sourceId,targetId,after){const stopIds=cards.map(card=>card.dataset.routeStopId),sourceIndex=stopIds.indexOf(sourceId);if(sourceIndex<0||!stopIds.includes(targetId)||sourceId===targetId)return stopIds;stopIds.splice(sourceIndex,1);const targetIndex=stopIds.indexOf(targetId);stopIds.splice(targetIndex+(after?1:0),0,sourceId);return stopIds}$('routeStops').addEventListener('dragstart',event=>{const card=event.target.closest('[data-route-stop-id][draggable="true"]');if(!card||routeReorderPending)return;draggedRouteStop=card.dataset.routeStopId;card.classList.add('route-dragging');event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('text/plain',draggedRouteStop)});$('routeStops').addEventListener('dragend',event=>{event.target.closest('.route-stop')?.classList.remove('route-dragging');clearRouteDropTargets();draggedRouteStop=''});$('routeStops').addEventListener('dragover',event=>{const card=event.target.closest('[data-route-stop-id][draggable="true"]');if(!card||!draggedRouteStop||routeReorderPending||card.dataset.routeStopId===draggedRouteStop)return;event.preventDefault();event.dataTransfer.dropEffect='move';clearRouteDropTargets();const cards=[...$('routeStops').querySelectorAll('[data-route-stop-id]')],after=routeDropAfter(cards,draggedRouteStop,card.dataset.routeStopId);card.classList.add('route-drop-target',after?'route-drop-after':'route-drop-before')});$('routeStops').addEventListener('drop',async event=>{const target=event.target.closest('[data-route-stop-id][draggable="true"]');if(!target||!draggedRouteStop||routeReorderPending)return;event.preventDefault();const cards=[...$('routeStops').querySelectorAll('[data-route-stop-id]')],sourceId=draggedRouteStop,targetId=target.dataset.routeStopId;if(sourceId===targetId)return;const after=routeDropAfter(cards,sourceId,targetId),stopIds=reorderedRouteStopIds(cards,sourceId,targetId,after);clearRouteDropTargets();routeReorderPending=true;$('routeStops').classList.add('route-reordering');try{await routeAction({action:'reorder',stop_ids:stopIds})}catch(e){showToast(e.message||String(e),'error');if(cache)renderRoutePlanner(cache)}finally{routeReorderPending=false;$('routeStops').classList.remove('route-reordering')}});
+const baseUpdateControls=updateControls;updateControls=function(data){baseUpdateControls(data);updateWorkaroundControl(data);renderRoutePlanner(data)};
 function groupText(g){return JSON.stringify(g).toLowerCase()}
 function firstObjective(g){return(g.objectives&&g.objectives[0])||{pickup:'',dropoff:'',commodity:'',scu:''}}
 function sortedGroups(groups){const mode=$('sort').value;const statusRank={ACCEPTED:0,COMPLETED:1,ABANDONED:2,FAILED:2,CANCELLED:2};const text=(v)=>String(v||'').toLowerCase();return groups.slice().sort((a,b)=>{const ao=firstObjective(a),bo=firstObjective(b);if(mode==='accepted_new')return(b.accepted_epoch||0)-(a.accepted_epoch||0);if(mode==='accepted_old')return(a.accepted_epoch||0)-(b.accepted_epoch||0);if(mode==='payout')return(b.payout_value||0)-(a.payout_value||0);if(mode==='duration')return(b.duration_seconds||0)-(a.duration_seconds||0);if(mode==='pickup')return text(ao.pickup).localeCompare(text(bo.pickup));if(mode==='dropoff')return text(ao.dropoff).localeCompare(text(bo.dropoff));if(mode==='commodity')return text(ao.commodity).localeCompare(text(bo.commodity));return(statusRank[a.status]??9)-(statusRank[b.status]??9)||(b.accepted_epoch||0)-(a.accepted_epoch||0)})}
@@ -8696,35 +10699,50 @@ function renderContracts(data){
         ?(first?`<td${span} class="scu-cell contract-cell"><span class="scu-stack shared-scu-stack"><strong>${esc(g.aggregate_scu||'Unknown')}${g.aggregate_scu?` SCU`:''}</strong>${g.aggregate_scu?`<small>shared</small>`:''}</span></td>`:'')
         :`<td class="scu-cell"><span class="scu-stack"><strong>${esc(scu)}</strong>${scu==='Unknown'?'':`<small>SCU</small>`}</span></td>`;
       const actions=g.mission_id?`<span class="contract-actions"><button class="contract-action edit${g.needs_review?' review':''}" type="button" data-contract-action="edit" data-mission-id="${esc(g.mission_id)}" title="${g.needs_review?'Enter missing contract details':'Edit contract details'}" aria-label="Edit contract details">${EDIT_CONTRACT_SVG}</button><button class="contract-action delete" type="button" data-contract-action="delete" data-mission-id="${esc(g.mission_id)}" title="Delete contract" aria-label="Delete contract">${DELETE_CONTRACT_SVG}</button></span>`:'';
-      html.push(`<tr class="${cl}">${first?`<td${span} class="contract-cell status-cell"><span class="status-wrap"><span class="status-pill"><span class="status-icon">${statusIcon(g.status)}</span><span class="status-copy"><span class="status-line"><strong>${esc(g.status)}</strong>${actions}</span><small>${esc(statusSubline(g.status,n))}</small></span></span></span></td>`:''}<td class="location-cell pickup-cell" title="${esc(o.pickup)}"><span class="route-location pickup-route">${LOCATION_SVGS.pickup}<span class="location-text">${esc(o.pickup)||'—'}</span></span></td><td class="location-cell dropoff-cell" title="${esc(o.dropoff)}"><span class="route-location dropoff-route">${LOCATION_SVGS.dropoff}<span class="location-text">${esc(o.dropoff)||'—'}</span></span></td><td class="commodity-cell" title="${esc(o.commodity)}"><span class="commodity-chip" style="--commodity-color:${commodityBoxColor(o.commodity)}">${CARGO_BOX_SVG}<span class="commodity-name">${esc(commodity)}</span></span></td>${scuCell}${first?`<td${span} class="contract-cell metric-cell payout-cell">${payout}</td><td${span} class="contract-cell metric-cell duration-cell">${duration}</td><td${span} class="contract-cell rank-cell">${rank}</td>`:''}</tr>`);
+      html.push(`<tr class="${cl}">${first?`<td${span} class="contract-cell status-cell"><span class="status-wrap"><span class="status-pill"><span class="status-icon">${statusIcon(g.status)}</span><span class="status-copy"><span class="status-line"><strong>${esc(g.status)}</strong>${actions}</span><small>${esc(statusSubline(g.status,n))}</small></span></span></span></td>`:''}<td class="location-cell pickup-cell" title="${esc(o.pickup_info?.subtitle||o.pickup)}"><span class="route-location pickup-route">${LOCATION_SVGS.pickup}<span class="location-text">${locationMarkup(o.pickup_info,o.pickup)}</span></span></td><td class="location-cell dropoff-cell" title="${esc(o.dropoff_info?.subtitle||o.dropoff)}"><span class="route-location dropoff-route">${LOCATION_SVGS.dropoff}<span class="location-text">${locationMarkup(o.dropoff_info,o.dropoff)}</span></span></td><td class="commodity-cell" title="${esc(o.commodity)}"><span class="commodity-chip" style="--commodity-color:${commodityBoxColor(o.commodity)}">${CARGO_BOX_SVG}<span class="commodity-name">${esc(commodity)}</span></span></td>${scuCell}${first?`<td${span} class="contract-cell metric-cell payout-cell">${payout}</td><td${span} class="contract-cell metric-cell duration-cell">${duration}</td><td${span} class="contract-cell rank-cell">${rank}</td>`:''}</tr>`);
     });
   }
   $('rows').innerHTML=html.join('')||'<tr class="empty-row"><td colspan="8">No hauling contracts match the current view</td></tr>';
+  [...$('rows').querySelectorAll('tr.group-start')].forEach((row,index)=>{const group=groups[index];if(group?.bug_fix?.hidden_count){row.querySelector('.status-copy small')?.insertAdjacentHTML('beforeend',`<span class="bug-notice"> · ${group.bug_fix.hidden_count} phantom pickup hidden</span>`)}});
 }
+async function ensureEditorLocationOptions(){if(editorLocationOptions.length)return editorLocationOptions;if(!editorLocationLoad)editorLocationLoad=fetch('/api/locations',{cache:'force-cache'}).then(r=>{if(!r.ok)throw new Error('Could not load location catalog');return r.json()}).then(j=>{editorLocationOptions=j.locations||[];return editorLocationOptions}).catch(e=>{editorLocationLoad=null;throw e});return editorLocationLoad}
+function closeEditorLocationMenus(except=null){$('contractEditorRows').querySelectorAll('.location-combobox').forEach(box=>{if(box===except)return;const menu=box.querySelector('.location-autocomplete'),input=box.querySelector('input');menu.hidden=true;menu.innerHTML='';input.setAttribute('aria-expanded','false')})}
+function editorLocationMatches(query){const tokens=String(query||'').toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);if(!tokens.length)return editorLocationOptions.slice(0,10);return editorLocationOptions.filter(option=>{const haystack=`${option.name||''} ${option.subtitle||''} ${option.system||''} ${option.parent||''}`.toLocaleLowerCase();return tokens.every(token=>haystack.includes(token))}).sort((a,b)=>{const q=String(query||'').toLocaleLowerCase();const ap=String(a.name||'').toLocaleLowerCase().startsWith(q)?0:1,bp=String(b.name||'').toLocaleLowerCase().startsWith(q)?0:1;return ap-bp||String(a.name||'').localeCompare(String(b.name||''))||String(a.subtitle||'').localeCompare(String(b.subtitle||''))}).slice(0,10)}
+function showEditorLocationMenu(input){const box=input.closest('.location-combobox'),menu=box.querySelector('.location-autocomplete'),body=input.closest('.editor-body');closeEditorLocationMenus(box);const matches=editorLocationMatches(input.value);menu.innerHTML=matches.length?matches.map(option=>`<button type="button" class="location-option" role="option" data-location-id="${esc(option.id)}"><strong>${esc(option.name)}</strong><small>${esc(option.subtitle||option.system||'Location')}</small></button>`).join(''):'<div class="location-empty-option">No matching catalog locations</div>';const boxRect=box.getBoundingClientRect(),bodyRect=body.getBoundingClientRect(),below=Math.max(0,bodyRect.bottom-boxRect.bottom-7),above=Math.max(0,boxRect.top-bodyRect.top-7),openUp=below<150&&above>below;menu.classList.toggle('open-up',openUp);menu.style.maxHeight=`${Math.max(72,Math.min(230,openUp?above:below))}px`;menu.hidden=false;input.setAttribute('aria-expanded','true')}
+function chooseEditorLocation(input,locationId){const option=editorLocationOptions.find(item=>item.id===locationId);if(!option)return;input.value=option.qualified_name||`${option.name}${option.subtitle?` — ${option.subtitle}`:''}`;input.dataset.locationId=option.id;closeEditorLocationMenus();input.focus()}
 function editorRowHtml(objective={}){
   const scope=objective.quantity_scope==='aggregate'?'aggregate':'per_route';
-  return `<div class="editor-row" data-quantity-scope="${scope}"><input data-field="pickup" value="${esc(objective.pickup||'Everus Harbor')}" placeholder="Pick up"><input data-field="dropoff" value="${esc(objective.dropoff||'')}" placeholder="Drop off"><input data-field="commodity" value="${esc(objective.commodity||'')}" placeholder="Commodity"><input data-field="scu" inputmode="decimal" value="${esc(objective.scu||'')}" placeholder="SCU"><button class="editor-remove" type="button" title="Remove objective" aria-label="Remove objective">${DELETE_CONTRACT_SVG}</button></div>`;
+  const pickup=objective.pickup_info?.qualified_name||objective.pickup||'Everus Harbor',dropoff=objective.dropoff_info?.qualified_name||objective.dropoff||'';
+  return `<div class="editor-row" data-quantity-scope="${scope}" data-pickup-source-section="${esc(objective.pickup_source_section||'other')}" data-pickup-source-order="${esc(objective.pickup_source_order??'')}" data-pickup-raw-text="${esc(objective.pickup_raw_text||'')}" data-pickup-parent="${esc(objective.pickup_parent||'')}"><div class="location-combobox"><input data-field="pickup" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" value="${esc(pickup)}" placeholder="Start typing a pickup"><div class="location-autocomplete" role="listbox" hidden></div></div><div class="location-combobox"><input data-field="dropoff" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" value="${esc(dropoff)}" placeholder="Start typing a drop-off"><div class="location-autocomplete" role="listbox" hidden></div></div><input data-field="commodity" value="${esc(objective.commodity||'')}" placeholder="Commodity"><input data-field="scu" inputmode="decimal" value="${esc(objective.scu||'')}" placeholder="SCU"><button class="editor-remove" type="button" title="Remove objective" aria-label="Remove objective">${DELETE_CONTRACT_SVG}</button></div>`;
 }
 function openContractEditor(group){
   if(!group||!group.mission_id){showToast('This contract has no MissionId and cannot be edited safely.','error');return}
   editorGroup=group;
   editorContractedBy=group.contracted_by||'';
+  editorPrimaryPickups=[...(group.objectives?.find(o=>o.primary_pickup_occurrences?.length)?.primary_pickup_occurrences||[])];
   $('contractEditorTitle').textContent=group.needs_review?'Complete missing contract details':'Edit contract details';
   $('contractEditorMission').textContent='MissionId · '+group.mission_id;
   $('contractEditorName').value=group.mission||'Hauling contract';
   $('contractEditorPayout').value=group.payout_value?String(group.payout_value):'';
   $('contractOcrText').value='';
   $('contractEditorRows').innerHTML=(group.objectives&&group.objectives.length?group.objectives:[{}]).map(editorRowHtml).join('');
+  ensureEditorLocationOptions().catch(e=>showToast(e.message||String(e),'error'));
+  const bug=group.bug_fix||{},panel=$('contractBugFixPanel');panel.hidden=!bug.eligible;
+  $('contractBugFixToggle').textContent=bug.enabled?'On':'Off';$('contractBugFixToggle').setAttribute('aria-pressed',bug.enabled?'true':'false');
+  $('contractBugWarning').textContent=bug.warning||'';
+  const originals=[];(group.original_objectives||[]).forEach(o=>{if(!originals.some(x=>x.pickup===o.pickup))originals.push(o)});
+  $('contractOriginalPickups').innerHTML=`<strong>Original pickup locations</strong>${originals.map(o=>`<label><input type="radio" name="validPickup" value="${esc(o.location_id)}" data-name="${esc(o.pickup)}" ${(bug.selected_pickup===o.pickup)?'checked':''}> ${esc(o.pickup)}${o.parent?`, ${esc(o.parent)}`:''}</label>`).join('')}<p><strong>Operational pickup:</strong> ${esc(bug.selected_pickup||'All original pickups')}</p>`;
   $('contractEditor').classList.add('open');$('contractEditor').setAttribute('aria-hidden','false');
   setTimeout(()=>$('contractEditorPayout').focus(),0);
 }
-function closeContractEditor(){editorGroup=null;editorContractedBy='';$('contractEditor').classList.remove('open');$('contractEditor').setAttribute('aria-hidden','true')}
-function contractEditorObjectives(){return [...$('contractEditorRows').querySelectorAll('.editor-row')].map(row=>({pickup:row.querySelector('[data-field="pickup"]').value.trim(),dropoff:row.querySelector('[data-field="dropoff"]').value.trim(),commodity:row.querySelector('[data-field="commodity"]').value.trim(),scu:row.querySelector('[data-field="scu"]').value.trim(),quantity_scope:row.dataset.quantityScope==='aggregate'?'aggregate':'per_route'})).filter(o=>o.pickup||o.dropoff||o.commodity||o.scu)}
+function closeContractEditor(){closeEditorLocationMenus();editorGroup=null;editorContractedBy='';editorPrimaryPickups=[];$('contractEditor').classList.remove('open');$('contractEditor').setAttribute('aria-hidden','true')}
+function contractEditorObjectives(){return [...$('contractEditorRows').querySelectorAll('.editor-row')].map(row=>({pickup:row.querySelector('[data-field="pickup"]').value.trim(),dropoff:row.querySelector('[data-field="dropoff"]').value.trim(),commodity:row.querySelector('[data-field="commodity"]').value.trim(),scu:row.querySelector('[data-field="scu"]').value.trim(),quantity_scope:row.dataset.quantityScope==='aggregate'?'aggregate':'per_route',pickup_source_section:row.dataset.pickupSourceSection||'other',pickup_source_order:row.dataset.pickupSourceOrder===''?null:Number(row.dataset.pickupSourceOrder),pickup_raw_text:row.dataset.pickupRawText||'',pickup_parent:row.dataset.pickupParent||'',primary_pickup_occurrences:[...editorPrimaryPickups]})).filter(o=>o.pickup||o.dropoff||o.commodity||o.scu)}
 function applyOcrParsed(parsed){
   if(!parsed)return;
   if(parsed.text&&$('contractOcrText'))$('contractOcrText').value=parsed.text;
   if(parsed.payout&&(!$('contractEditorPayout').value||$('contractEditorPayout').value==='0'))$('contractEditorPayout').value=String(parsed.payout);
   if(parsed.contracted_by)editorContractedBy=parsed.contracted_by;
+  if(parsed.primary_pickup_occurrences?.length)editorPrimaryPickups=[...parsed.primary_pickup_occurrences];
   const rows=parsed.objectives||[];
   if(rows.length){
     $('contractEditorRows').innerHTML=rows.map(editorRowHtml).join('');
@@ -8787,7 +10805,13 @@ async function confirmDeleteContract(){
 }
 $('rows').addEventListener('click',event=>{const button=event.target.closest('.contract-action[data-contract-action][data-mission-id]');if(!button||!cache)return;const group=(cache.groups||[]).find(g=>g.mission_id===button.dataset.missionId);if(button.dataset.contractAction==='edit'){if(group)openContractEditor(group);return}if(button.dataset.contractAction==='delete')openDeleteConfirm(button.dataset.missionId,group,button)});
 $('contractEditorRows').addEventListener('click',event=>{const button=event.target.closest('.editor-remove');if(!button)return;button.closest('.editor-row')?.remove();if(!$('contractEditorRows').children.length)$('contractEditorRows').innerHTML=editorRowHtml({})});
+$('contractEditorRows').addEventListener('focusin',async event=>{const input=event.target.closest('.location-combobox input');if(!input)return;try{await ensureEditorLocationOptions();if(document.activeElement===input)showEditorLocationMenu(input)}catch(_e){}});
+$('contractEditorRows').addEventListener('input',event=>{const input=event.target.closest('.location-combobox input');if(!input)return;delete input.dataset.locationId;if(editorLocationOptions.length)showEditorLocationMenu(input)});
+$('contractEditorRows').addEventListener('keydown',event=>{const input=event.target.closest('.location-combobox input');if(!input)return;const menu=input.closest('.location-combobox').querySelector('.location-autocomplete'),options=[...menu.querySelectorAll('.location-option')];if(event.key==='Escape'){closeEditorLocationMenus();return}if(!['ArrowDown','ArrowUp','Enter'].includes(event.key)||menu.hidden)return;let index=options.findIndex(option=>option.classList.contains('active'));if(event.key==='Enter'){if(index>=0){event.preventDefault();chooseEditorLocation(input,options[index].dataset.locationId)}return}event.preventDefault();index=event.key==='ArrowDown'?Math.min(index+1,options.length-1):Math.max(index<0?options.length:index-1,0);options.forEach((option,i)=>option.classList.toggle('active',i===index));options[index]?.scrollIntoView({block:'nearest'})});
+$('contractEditorRows').addEventListener('pointerdown',event=>{const option=event.target.closest('.location-option');if(!option)return;event.preventDefault();const input=option.closest('.location-combobox').querySelector('input');chooseEditorLocation(input,option.dataset.locationId)});
+$('contractEditorRows').addEventListener('focusout',event=>{const box=event.target.closest('.location-combobox');if(!box)return;setTimeout(()=>{if(!box.contains(document.activeElement))closeEditorLocationMenus()},0)});
 $('contractEditorAdd').addEventListener('click',()=>{$('contractEditorRows').insertAdjacentHTML('beforeend',editorRowHtml({pickup:'Everus Harbor',quantity_scope:editorGroup?.aggregate_quantity?'aggregate':'per_route'}))});
+$('contractBugFixToggle').addEventListener('click',async()=>{if(!editorGroup)return;const enable=!editorGroup.bug_fix?.enabled,selected=$('contractOriginalPickups').querySelector('input[name="validPickup"]:checked');if(enable&&!selected){showToast('Select the valid pickup before enabling the workaround.','info');return}setBusy(true);try{const payload={action:'set_bug_fix',mission_id:editorGroup.mission_id,enabled:enable,selected_pickup_id:selected?.value||'',selected_pickup_name:selected?.dataset.name||''};const r=await fetch('/api/contracts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'Could not update workaround');render(j.state||await fetchState());const updated=(cache.groups||[]).find(g=>g.mission_id===editorGroup.mission_id);if(updated)openContractEditor(updated);showToast(enable?'Phantom pickups hidden operationally.':'Original pickups restored.','success')}catch(e){showToast(e.message||String(e),'error')}finally{setBusy(false)}});
 $('contractOcrRead').addEventListener('click',()=>runContractOcr('read_screenshot'));
 $('contractOcrParse').addEventListener('click',()=>runContractOcr('parse_text'));
 $('contractEditorClose').addEventListener('click',closeContractEditor);$('contractEditorCancel').addEventListener('click',closeContractEditor);$('contractEditorSave').addEventListener('click',()=>submitContractEditor('save'));$('contractEditorClear').addEventListener('click',()=>submitContractEditor('clear'));
@@ -8832,7 +10856,7 @@ function updateChecklistHeader(items,sections){
   $('hideLoadedBtn').textContent=hideLoaded?'Show loaded':'Hide loaded';
 }
 function nextLogisticsItem(sections){for(const section of sections||[]){const mode=section.mode||'direct',fixed=section.fixed_location||'—';for(const col of section.columns||[]){for(const it of col.items||[]){const id=logisticsItemId(it,mode,fixed,col.location||'—');if(!loadingChecklist[id])return{section,mode,fixed,column:col,item:it,id}}}}return null}
-function updateNextAction(sections){const el=$('nextAction');if(!(sections||[]).length){el.classList.remove('complete');el.innerHTML='<span><strong>Next:</strong> no active cargo</span><small>0 SCU</small>';return}const next=nextLogisticsItem(sections);if(!next){el.classList.add('complete');el.innerHTML='<span><strong>Next:</strong> all visible cargo is loaded</span><small>clear</small>';return}el.classList.remove('complete');if(next.mode==='aggregate_pickups'){const shared=next.section.shared_scu||next.section.total||'';el.innerHTML=`<span><strong>Next:</strong> collect ${esc(next.item.commodity)} at ${esc(next.column.location)} → ${esc(next.fixed)}</span><small>${esc(shared)} SCU shared</small>`;return}const label=next.mode==='single_dropoff'?'Pick up':'Load at';const destination=next.mode==='single_pickup'?` → ${next.column.location}`:next.mode==='single_dropoff'?` → ${next.fixed}`:` → ${next.column.location}`;el.innerHTML=`<span><strong>Next:</strong> ${esc(label)} ${esc(next.mode==='single_dropoff'?next.column.location:next.fixed)} · ${esc(next.item.commodity)}${esc(destination)}</span><small>${esc(next.item.scu)} SCU</small>`}
+function updateNextAction(sections){const el=$('nextAction');if(!(sections||[]).length){el.classList.remove('complete');el.innerHTML='<span><strong>Next:</strong> no active cargo</span><small>0 SCU</small>';return}const next=nextLogisticsItem(sections);if(!next){el.classList.add('complete');el.innerHTML='<span><strong>Next:</strong> all visible cargo is loaded</span><small>clear</small>';return}const columnName=next.column.location_info?.name||next.column.location,fixedName=next.section.fixed_location_info?.name||next.fixed;el.classList.remove('complete');if(next.mode==='aggregate_pickups'){const shared=next.section.shared_scu||next.section.total||'';el.innerHTML=`<span><strong>Next:</strong> collect ${esc(next.item.commodity)} at ${esc(columnName)} → ${esc(fixedName)}</span><small>${esc(shared)} SCU shared</small>`;return}const label=next.mode==='single_dropoff'?'Pick up':'Load at';const destination=next.mode==='single_pickup'?` → ${columnName}`:next.mode==='single_dropoff'?` → ${fixedName}`:` → ${columnName}`;el.innerHTML=`<span><strong>Next:</strong> ${esc(label)} ${esc(next.mode==='single_dropoff'?columnName:fixedName)} · ${esc(next.item.commodity)}${esc(destination)}</span><small>${esc(next.item.scu)} SCU</small>`}
 function renderLogistics(data){
   if(data?.checklist&&typeof data.checklist==='object'){loadingChecklist={...data.checklist};saveChecklist()}
   const lg=data.logistics||{};
@@ -8874,9 +10898,11 @@ function renderLogistics(data){
     const sectionStats=checklistStats(sectionItems);
     const sectionComplete=sectionStats.total>0&&sectionStats.loaded===sectionStats.total;
     const sectionPercent=sectionStats.total?Math.round(sectionStats.loaded/sectionStats.total*100):0;
+    let hasLongCommodityList=false;
     const cards=(section.columns||[]).map(col=>{
       const allCardItems=(col.items||[]).map(it=>({raw:it,id:logisticsItemId(it,mode,fixed,col.location||'—'),scu:Number(it.scu_value??it.scu??0)}));
       const cardItems=hideLoaded?allCardItems.filter(entry=>!loadingChecklist[entry.id]):allCardItems;
+      if(cardItems.length>2)hasLongCommodityList=true;
       const cardStats=checklistStats(allCardItems);
       const cardComplete=cardStats.total>0&&cardStats.loaded===cardStats.total;
       const items=cardItems.map(entry=>{
@@ -8886,11 +10912,11 @@ function renderLogistics(data){
         return `<label class="item load-item ${clsStatus(it.status)}${checked?' is-loaded':''}" data-check-id="${esc(entry.id)}"><input class="load-check" type="checkbox" data-check-id="${esc(entry.id)}"${checked?' checked':''} aria-label="${esc(aria)}"><span class="check-box" aria-hidden="true"></span><span class="commodity-label"><span style="color:${commodityBoxColor(it.commodity)}">${CARGO_BOX_SVG}</span><span>${esc(it.commodity)}</span></span>${amount?`<b>${esc(amount)} SCU</b>`:''}</label>`;
       }).join('')||(hideLoaded&&cardComplete?'<div class="item" style="color:var(--muted);justify-content:center;margin-top:26px">Loaded</div>':'<div class="item" style="color:var(--muted);justify-content:center;margin-top:26px">—</div>');
       const cardQuantity=mode==='aggregate_pickups'?'SCU not split':`${formatChecklistScu(cardStats.loadedScu)} / ${formatChecklistScu(cardStats.totalScu)} SCU`;
-      return `<article class="dest-card"><h4 title="${esc(col.location)}">${esc(col.location)}</h4><div class="items">${items}</div><div class="total${cardComplete?' complete':''}"><span class="loaded-count">${cardStats.loaded}/${cardStats.total} loaded</span><span class="loaded-scu">${esc(cardQuantity)}</span></div></article>`;
+      return `<article class="dest-card"><h4 title="${esc(col.location_info?.subtitle||col.location)}">${locationMarkup(col.location_info,col.location)}</h4><div class="items">${items}</div><div class="total${cardComplete?' complete':''}"><span class="loaded-count">${cardStats.loaded}/${cardStats.total} loaded</span><span class="loaded-scu">${esc(cardQuantity)}</span></div></article>`;
     }).join('');
     const totalCopy=mode==='aggregate_pickups'?`${section.total} SCU shared total`:`${section.total} SCU total`;
     const progressCopy=mode==='aggregate_pickups'?`${sectionStats.loaded}/${sectionStats.total} pickup locations loaded`:`${sectionStats.loaded}/${sectionStats.total} loaded · ${formatChecklistScu(sectionStats.loadedScu)}/${formatChecklistScu(sectionStats.totalScu)} SCU`;
-    return `<div class="logistics-group ${esc(mode)}"><div class="pickup-card"><small>${esc(title)}</small><div class="loc">${esc(fixed)}</div><p>${esc(desc)} · ${esc(totalCopy)}</p><div class="section-check-progress${sectionComplete?' complete':''}"><div class="check-progress-track"><div class="check-progress-fill" style="--progress:${sectionPercent}%"></div></div><small>${esc(progressCopy)}</small></div></div><div class="destinations">${cards}</div></div>`;
+    return `<div class="logistics-group ${esc(mode)}${hasLongCommodityList?' long-commodity-list':''}"><div class="pickup-card"><small>${esc(title)}</small><div class="loc">${locationMarkup(section.fixed_location_info,fixed)}</div><p>${esc(desc)} · ${esc(totalCopy)}</p><div class="section-check-progress${sectionComplete?' complete':''}"><div class="check-progress-track"><div class="check-progress-fill" style="--progress:${sectionPercent}%"></div></div><small>${esc(progressCopy)}</small></div></div><div class="destinations">${cards}</div></div>`;
   }).join('');
 }
 $('logisticsGroups').addEventListener('change',event=>{
@@ -8901,19 +10927,19 @@ $('logisticsGroups').addEventListener('change',event=>{
   if(input.checked)loadingChecklist[id]=true;else delete loadingChecklist[id];
   saveChecklist();
   syncChecklist('set',id,!!loadingChecklist[id]);
-  if(cache){cache.checklist={...loadingChecklist};renderLogistics(cache)};
+  if(cache){cache.checklist={...loadingChecklist};renderLogistics(cache);renderRoutePlanner(cache)};
 });
 $('clearChecklistBtn').addEventListener('click',()=>{
   loadingChecklist={};
   saveChecklist();
   syncChecklist('clear');
-  if(cache){cache.checklist={};renderLogistics(cache)};
+  if(cache){cache.checklist={};renderLogistics(cache);renderRoutePlanner(cache)};
 });
 $('hideLoadedBtn').addEventListener('click',()=>{hideLoaded=!hideLoaded;try{localStorage.setItem(HIDE_LOADED_KEY,String(hideLoaded))}catch(_e){}if(cache)renderLogistics(cache)});
 window.addEventListener('storage',event=>{
   if(event.key!==CHECKLIST_STORAGE_KEY)return;
   loadingChecklist=loadChecklist();
-  if(cache){cache.checklist={...loadingChecklist};renderLogistics(cache)};
+  if(cache){cache.checklist={...loadingChecklist};renderLogistics(cache);renderRoutePlanner(cache)};
 });
 $('openOverlayBtn').addEventListener('click',async()=>{
   const button=$('openOverlayBtn');button.disabled=true;
@@ -8934,6 +10960,19 @@ $('openOverlayBtn').addEventListener('click',async()=>{
     showToast('Could not open overlay: '+(e.message||e),'error');
   }finally{button.disabled=!desktopBridgeReady}
 });
+$('openRouteOverlayBtn').addEventListener('click',async()=>{
+  const button=$('openRouteOverlayBtn');button.disabled=true;
+  try{
+    let status=null;
+    if(window.pywebview?.api?.open_route_overlay)status=await window.pywebview.api.open_route_overlay();
+    else{const r=await fetch('/api/desktop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'open_route_overlay'})}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'Native desktop controller is unavailable.');status=j.status}
+    if(status?.error)throw new Error(status.error);
+    showToast('Compact Route Planner overlay opened.','success');
+  }catch(e){
+    await probeDesktopBridge();
+    showToast('Could not open route overlay: '+(e.message||e),'error');
+  }finally{button.disabled=!desktopBridgeReady}
+});
 function render(data){cache=data;const versionText='v'+data.version+(desktopBridgeReady?'':' · diagnostic browser');$('version').textContent=versionText;const windowVersion=$('windowVersion');if(windowVersion)windowVersion.textContent='v'+data.version+' · cargo operations console';if(document.activeElement!==$('logPath'))$('logPath').value=data.log_path||'';$('accepted').textContent=data.stats.accepted;$('completed').textContent=data.stats.completed;$('profit').textContent=data.stats.profit;$('missionRate').textContent=data.stats.mission_rate;$('sessionRate').textContent=data.stats.session_rate;$('missionElapsed').textContent='mission elapsed '+data.stats.mission_elapsed;$('sessionElapsed').textContent='session elapsed '+data.stats.session_elapsed+' · '+data.timer_label.toLowerCase();$('timer').textContent=data.timer_elapsed;const stateClass=(data.timer_state||'stopped').replace('armed_first','waiting');$('timerState').textContent=data.timer_label;$('timerState').className='state '+stateClass;$('sCompleted').textContent=data.stats.completed+' completed';$('sAccepted').textContent=data.stats.accepted+' accepted';$('sProfit').textContent=data.stats.profit+' aUEC';$('sRate').textContent=data.stats.session_rate+' aUEC/hr';$('status').textContent=data.status||'Ready';$('lastScan').textContent=data.last_scan||'—';$('ocrStatus').textContent=data.ocr?.status||'Auto OCR ready';$('online').textContent=data.watching?'ONLINE':'IDLE';$('online').className=data.watching?'greenText':'blueText';$('footerRight').innerHTML=(data.watching?'<span class="greenText">● live feed active</span>':'<span>idle</span>')+' · '+esc(data.last_scan||'—');renderContracts(data);renderLogistics(data);updateControls(data)}
 async function refresh(){if(refreshing||busy)return;refreshing=true;try{render(await fetchState())}catch(e){showToast('Cannot reach local tracker server: '+(e.message||e),'error')}finally{refreshing=false}}
 refresh();setInterval(refresh,1000);
@@ -8943,7 +10982,7 @@ refresh();setInterval(refresh,1000);
 
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "SCHaulingWeb/1.5.67"
+        server_version = "SCHaulingWeb/1.6.0"
 
         def log_message(self, fmt, *args):
             # Keep terminal clean unless there is a debugging need.
@@ -9007,6 +11046,39 @@ refresh();setInterval(refresh,1000);
                 self.end_headers()
                 self.wfile.write(data)
                 return
+            if parsed.path == "/route-overlay":
+                data = ROUTE_OVERLAY_HTML.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            if parsed.path == "/route-overlay-debug":
+                data = ROUTE_OVERLAY_DEBUG_HTML.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            if parsed.path == "/api/debug/route-overlay-scenarios":
+                scenarios = route_overlay_debug_scenarios()
+                self.send_json({
+                    "ok": True,
+                    "scenarios": [{"id": key, "title": item["title"]} for key, item in scenarios.items()],
+                })
+                return
+            if parsed.path == "/api/debug/route-overlay-state":
+                scenario_id = str(urllib.parse.parse_qs(parsed.query).get("scenario", [""])[0])
+                scenario = route_overlay_debug_scenarios().get(scenario_id)
+                if scenario is None:
+                    self.send_json({"ok": False, "error": "Unknown route overlay scenario."}, code=404)
+                    return
+                self.send_json(scenario["state"])
+                return
             if parsed.path == "/api/runtime":
                 controller = desktop_controller()
                 self.send_json({
@@ -9017,6 +11089,15 @@ refresh();setInterval(refresh,1000);
                 return
             if parsed.path == "/api/state":
                 self.send_json(state.to_state())
+                return
+            if parsed.path == "/api/locations":
+                with state.lock:
+                    options = [
+                        record.payload() for record in state.location_catalog.records
+                        if record.qt_valid and not record.name.lower().endswith(" clinic")
+                    ]
+                options.sort(key=lambda item: (str(item.get("name") or "").casefold(), str(item.get("subtitle") or "").casefold()))
+                self.send_json({"ok": True, "locations": options})
                 return
             if parsed.path == "/api/checklist":
                 self.send_json({"ok": True, "checklist": state.checklist_snapshot()})
@@ -9048,13 +11129,85 @@ refresh();setInterval(refresh,1000);
             self.send_error(404)
 
         def do_POST(self):
-            if self.path not in ("/api/action", "/api/desktop", "/api/checklist", "/api/contracts", "/api/ocr"):
+            if self.path not in ("/api/action", "/api/desktop", "/api/checklist", "/api/contracts", "/api/ocr", "/api/route"):
                 self.send_error(404); return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 body = self.rfile.read(length).decode("utf-8") if length else "{}"
                 payload = json.loads(body or "{}")
                 action = payload.get("action")
+                if self.path == "/api/route":
+                    if action == "invalidate":
+                        state.invalidate_route_inputs(
+                            payload.get("selected_contracts") or [], payload.get("scope") or "all",
+                        )
+                        self.send_json({"ok": True, "state": state.to_state()})
+                        return
+                    if action == "resolve_location":
+                        state.resolve_route_location(
+                            payload.get("captured_name") or "", payload.get("canonical_name") or "",
+                        )
+                        self.send_json({"ok": True, "state": state.to_state()})
+                        return
+                    if action == "set_scope":
+                        state.set_route_scope(payload.get("scope") or "all", payload.get("selected_contracts") or [])
+                        self.send_json({"ok": True, "state": state.to_state()})
+                        return
+                    if action == "activate":
+                        route = state.activate_route_preset(payload.get("preset") or "all")
+                        self.send_json({"ok": True, "route": route, "state": state.to_state()})
+                        return
+                    if action == "begin_custom":
+                        route = state.begin_custom_route()
+                        self.send_json({"ok": True, "route": route, "state": state.to_state()})
+                        return
+                    if action == "reorder":
+                        route = state.reorder_custom_route(payload.get("stop_ids") or [])
+                        self.send_json({"ok": True, "route": route, "state": state.to_state()})
+                        return
+                    if action == "set_endpoint":
+                        route = state.set_custom_route_endpoint(
+                            payload.get("endpoint") or "", payload.get("location") or "",
+                        )
+                        self.send_json({"ok": True, "route": route, "state": state.to_state()})
+                        return
+                    if action == "add_custom_waypoint":
+                        route = state.add_custom_route_waypoint(
+                            payload.get("location") or "", payload.get("after_stop_id") or "",
+                        )
+                        self.send_json({"ok": True, "route": route, "state": state.to_state()})
+                        return
+                    if action == "remove_custom_stop":
+                        route = state.remove_custom_route_stop(payload.get("stop_id") or "")
+                        self.send_json({"ok": True, "route": route, "state": state.to_state()})
+                        return
+                    if action == "reoptimize_custom":
+                        route = state.reoptimize_custom_route()
+                        self.send_json({"ok": True, "route": route, "state": state.to_state()})
+                        return
+                    if action == "confirm_custom":
+                        route = state.confirm_custom_route()
+                        self.send_json({"ok": True, "route": route, "state": state.to_state()})
+                        return
+                    if action == "add_waypoint":
+                        waypoint = state.add_route_waypoint(payload.get("location") or "")
+                        self.send_json({"ok": True, "waypoint": waypoint, "state": state.to_state()})
+                        return
+                    if action == "remove_waypoint":
+                        state.remove_route_waypoint(payload.get("location_id") or "")
+                        self.send_json({"ok": True, "state": state.to_state()})
+                        return
+                    if action == "clear":
+                        state.clear_active_route()
+                        self.send_json({"ok": True, "state": state.to_state()})
+                        return
+                    if action != "optimize": raise ValueError(f"Unknown route action: {action}")
+                    route = state.optimize_active_route(
+                        payload.get("selected_contracts") or [], payload.get("scope") or "all",
+                        bool(payload.get("force")),
+                    )
+                    self.send_json({"ok": True, "route": route, "state": state.to_state()})
+                    return
                 if self.path == "/api/checklist":
                     if action == "set":
                         snapshot = state.set_checklist_item(payload.get("id") or "", bool(payload.get("checked")))
@@ -9079,6 +11232,11 @@ refresh();setInterval(refresh,1000);
                         state.clear_contract_override(mission_id)
                     elif action == "delete":
                         state.delete_contract(mission_id)
+                    elif action == "set_bug_fix":
+                        state.set_contract_bug_fix(
+                            mission_id, bool(payload.get("enabled")),
+                            payload.get("selected_pickup_id") or "", payload.get("selected_pickup_name") or "",
+                        )
                     else:
                         raise ValueError(f"Unknown contract action: {action}")
                     self.send_json({"ok": True, "state": state.to_state()})
@@ -9122,6 +11280,8 @@ refresh();setInterval(refresh,1000);
                         return
                     actions = {
                         "open_overlay": controller.open_overlay,
+                        "open_route_overlay": controller.open_route_overlay,
+                        "hide_route_overlay": controller.hide_route_overlay,
                         "hide_overlay": controller.hide_overlay,
                         "toggle_overlay": controller.toggle_overlay,
                         "overlay_status": controller.get_overlay_status,
@@ -9175,6 +11335,8 @@ refresh();setInterval(refresh,1000);
                     state.toggle_timer()
                 elif action == "toggle_auto_ocr":
                     state.toggle_auto_ocr()
+                elif action == "toggle_multi_pickup_bug_default":
+                    state.toggle_multi_pickup_bug_default()
                 else:
                     if action:
                         raise ValueError(f"Unknown action: {action}")
@@ -9197,6 +11359,7 @@ refresh();setInterval(refresh,1000);
     if httpd is None:
         raise RuntimeError(f"Could not bind local server: {last_err}")
     url = f"http://{host}:{chosen_port}/"
+    browser_url = url.rstrip("/") + "/" + str(browser_path or "/").lstrip("/")
     print(f"{APP_NAME} {APP_VERSION} running at {url}")
     if port_callback is not None:
         port_callback(chosen_port)
@@ -9212,7 +11375,7 @@ refresh();setInterval(refresh,1000);
     print("Press Ctrl+C in this terminal to stop the local dashboard.")
     if open_browser:
         try:
-            webbrowser.open(url)
+            webbrowser.open(browser_url)
         except Exception:
             pass
     try:
@@ -9342,10 +11505,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--browser", action="store_true", help="Diagnostic mode: open the local dashboard in the default browser (native overlay unavailable)")
     ap.add_argument("--port", type=int, default=8765, help="Local web dashboard port")
     ap.add_argument("--no-browser", action="store_true", help="Do not open the browser automatically")
+    ap.add_argument("--debug-route-overlay", action="store_true", help="Open the compact Route Overlay scenario gallery")
     ap.add_argument("--csv", help="Export CSV path")
     ap.add_argument("--html", help="Export HTML path")
     ap.add_argument("--tail-mb", type=int, default=2, help="How many MB from end of log to scan")
     ap.add_argument("--overlay-child", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--overlay-kind", choices=("logistics", "route"), default="logistics", help=argparse.SUPPRESS)
     ap.add_argument("--base-url", help=argparse.SUPPRESS)
     ap.add_argument("--parent-pid", type=int, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
@@ -9354,7 +11519,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not args.base_url:
             show_native_message("SC Hauling Overlay startup error", "Missing local tracker server URL.", error=True)
             return 2
-        return run_overlay_child(args.base_url, args.parent_pid)
+        return run_overlay_child(args.base_url, args.parent_pid, args.overlay_kind)
+
+    if args.debug_route_overlay:
+        run_web_dashboard(
+            args.log, port=args.port, open_browser=not args.no_browser,
+            browser_path="/route-overlay-debug",
+        )
+        return 0
 
     if not args.no_gui:
         if args.tk_gui:
