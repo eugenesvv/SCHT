@@ -1,0 +1,282 @@
+<2026-07-14T10:00:00.000Z> BackupNameAttachment="Route Planner Persistence Debug" -- synthetic accepted-contract fixture
+<2026-07-14T10:00:01.000Z> [Notice] <Game Version> Route editing, preset persistence, progress, and reoptimization fixture [Team_Debug][Synthetic]
+
+<2026-07-14T10:00:10.000Z> [Notice] <SHUDEvent_OnNotification> Added notification "Contract Accepted:  Junior | Stellar Small Haul | to Dudley & Daughters [50/200/250/500/1000/2000/4000 Rep | Fallow Field -> Dudley & Daughters" to queue. MissionId: [a1400001-0000-4000-8000-000000000001], ObjectiveId: [] [Team_Debug][Synthetic]
+<2026-07-14T10:00:10.010Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Collect Copper from Fallow Field." to queue. MissionId: [a1400001-0000-4000-8000-000000000001], ObjectiveId: [route_pickup_01_01] [Team_Debug][Synthetic]
+<2026-07-14T10:00:10.020Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Deliver 0/7 SCU of Copper to Dudley & Daughters at the L4 Lagrange of Pyro VI:" to queue. MissionId: [a1400001-0000-4000-8000-000000000001], ObjectiveId: [route_pickup_01_01] [Team_Debug][Synthetic]
+<2026-07-14T10:00:10.100Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 1
+<2026-07-14T10:00:10.101Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 2
+<2026-07-14T10:00:10.102Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 3
+<2026-07-14T10:00:10.103Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 4
+<2026-07-14T10:00:10.104Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 5
+<2026-07-14T10:00:10.105Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 6
+<2026-07-14T10:00:10.106Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 7
+<2026-07-14T10:00:10.107Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 8
+<2026-07-14T10:00:10.108Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 9
+<2026-07-14T10:00:10.109Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 10
+<2026-07-14T10:00:10.110Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 11
+<2026-07-14T10:00:10.111Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 12
+<2026-07-14T10:00:10.112Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 13
+<2026-07-14T10:00:10.113Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 14
+<2026-07-14T10:00:10.114Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 15
+<2026-07-14T10:00:10.115Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 16
+<2026-07-14T10:00:10.116Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 17
+<2026-07-14T10:00:10.117Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 18
+<2026-07-14T10:00:10.118Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 19
+<2026-07-14T10:00:10.119Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 20
+<2026-07-14T10:00:10.120Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 21
+<2026-07-14T10:00:10.121Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 22
+<2026-07-14T10:00:10.122Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 23
+<2026-07-14T10:00:10.123Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 24
+<2026-07-14T10:00:10.124Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 25
+<2026-07-14T10:00:10.125Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 26
+<2026-07-14T10:00:10.126Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 27
+<2026-07-14T10:00:10.127Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 28
+<2026-07-14T10:00:10.128Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 29
+<2026-07-14T10:00:10.129Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 30
+<2026-07-14T10:00:10.130Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 31
+<2026-07-14T10:00:10.131Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 32
+<2026-07-14T10:00:10.132Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 33
+<2026-07-14T10:00:10.133Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 34
+<2026-07-14T10:00:10.134Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 35
+<2026-07-14T10:00:10.135Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 36
+<2026-07-14T10:00:10.136Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 37
+<2026-07-14T10:00:10.137Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 38
+<2026-07-14T10:00:10.138Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 39
+<2026-07-14T10:00:10.139Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 40
+<2026-07-14T10:00:10.140Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 41
+<2026-07-14T10:00:10.141Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 42
+<2026-07-14T10:00:10.142Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 43
+<2026-07-14T10:00:10.143Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 44
+<2026-07-14T10:00:10.144Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 45
+<2026-07-14T10:00:10.145Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 46
+<2026-07-14T10:00:10.146Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 47
+<2026-07-14T10:00:10.147Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 48
+<2026-07-14T10:00:10.148Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 49
+<2026-07-14T10:00:10.149Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 50
+<2026-07-14T10:00:10.150Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 51
+<2026-07-14T10:00:10.151Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 52
+<2026-07-14T10:00:10.152Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 53
+<2026-07-14T10:00:10.153Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 54
+<2026-07-14T10:00:10.154Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 55
+<2026-07-14T10:00:10.155Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 56
+<2026-07-14T10:00:10.156Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 57
+<2026-07-14T10:00:10.157Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 58
+<2026-07-14T10:00:10.158Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 59
+<2026-07-14T10:00:10.159Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 60
+<2026-07-14T10:00:10.160Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 61
+<2026-07-14T10:00:10.161Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 62
+<2026-07-14T10:00:10.162Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 63
+<2026-07-14T10:00:10.163Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 64
+<2026-07-14T10:00:10.164Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 65
+<2026-07-14T10:00:10.165Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 66
+<2026-07-14T10:00:10.166Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 67
+<2026-07-14T10:00:10.167Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 68
+<2026-07-14T10:00:10.168Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 69
+<2026-07-14T10:00:10.169Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 70
+<2026-07-14T10:00:10.170Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 71
+<2026-07-14T10:00:10.171Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 72
+<2026-07-14T10:00:10.172Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 73
+<2026-07-14T10:00:10.173Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 74
+<2026-07-14T10:00:10.174Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 75
+<2026-07-14T10:00:10.175Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 76
+<2026-07-14T10:00:10.176Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 77
+<2026-07-14T10:00:10.177Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 78
+<2026-07-14T10:00:10.178Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 79
+<2026-07-14T10:00:10.179Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 80
+<2026-07-14T10:00:10.180Z> [Trace] <DebugBlockSeparator> dudley-pickup-2 81
+<2026-07-14T10:00:10.030Z> [Notice] <SHUDEvent_OnNotification> Added notification "Contract Accepted:  Junior | Stellar Small Haul | to Dudley & Daughters [50/200/250/500/1000/2000/4000 Rep | Ashland -> Dudley & Daughters" to queue. MissionId: [a1400001-0000-4000-8000-000000000001], ObjectiveId: [] [Team_Debug][Synthetic]
+<2026-07-14T10:00:10.040Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Collect Copper from Ashland." to queue. MissionId: [a1400001-0000-4000-8000-000000000001], ObjectiveId: [route_pickup_01_02] [Team_Debug][Synthetic]
+<2026-07-14T10:00:10.050Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Deliver 0/0 SCU of Copper to Dudley & Daughters at the L4 Lagrange of Pyro VI:" to queue. MissionId: [a1400001-0000-4000-8000-000000000001], ObjectiveId: [route_pickup_01_02] [Team_Debug][Synthetic]
+
+<2026-07-14T10:00:20.000Z> [Notice] <SHUDEvent_OnNotification> Added notification "Contract Accepted:  Junior | Stellar Small Haul | to Rustville [50/200/250/500/1000/2000/4000 Rep | The Golden Riviera -> Rustville" to queue. MissionId: [a1400002-0000-4000-8000-000000000002], ObjectiveId: [] [Team_Debug][Synthetic]
+<2026-07-14T10:00:20.010Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Collect Waste from The Golden Riviera." to queue. MissionId: [a1400002-0000-4000-8000-000000000002], ObjectiveId: [route_pickup_02] [Team_Debug][Synthetic]
+<2026-07-14T10:00:20.020Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Deliver 0/7 SCU of Waste to Rustville:" to queue. MissionId: [a1400002-0000-4000-8000-000000000002], ObjectiveId: [route_dropoff_02] [Team_Debug][Synthetic]
+
+<2026-07-14T10:00:30.000Z> [Notice] <SHUDEvent_OnNotification> Added notification "Contract Accepted:  Junior | Stellar Small Haul | to Gaslight [50/200/250/500/1000/2000/4000 Rep | The Golden Riviera -> Gaslight" to queue. MissionId: [a1400003-0000-4000-8000-000000000003], ObjectiveId: [] [Team_Debug][Synthetic]
+<2026-07-14T10:00:30.010Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Collect Hydrogen from The Golden Riviera." to queue. MissionId: [a1400003-0000-4000-8000-000000000003], ObjectiveId: [route_pickup_03_01] [Team_Debug][Synthetic]
+<2026-07-14T10:00:30.020Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Deliver 0/9 SCU of Hydrogen to Gaslight at the L2 Lagrange of Pyro V:" to queue. MissionId: [a1400003-0000-4000-8000-000000000003], ObjectiveId: [route_pickup_03_01] [Team_Debug][Synthetic]
+<2026-07-14T10:00:30.100Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 1
+<2026-07-14T10:00:30.101Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 2
+<2026-07-14T10:00:30.102Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 3
+<2026-07-14T10:00:30.103Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 4
+<2026-07-14T10:00:30.104Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 5
+<2026-07-14T10:00:30.105Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 6
+<2026-07-14T10:00:30.106Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 7
+<2026-07-14T10:00:30.107Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 8
+<2026-07-14T10:00:30.108Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 9
+<2026-07-14T10:00:30.109Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 10
+<2026-07-14T10:00:30.110Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 11
+<2026-07-14T10:00:30.111Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 12
+<2026-07-14T10:00:30.112Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 13
+<2026-07-14T10:00:30.113Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 14
+<2026-07-14T10:00:30.114Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 15
+<2026-07-14T10:00:30.115Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 16
+<2026-07-14T10:00:30.116Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 17
+<2026-07-14T10:00:30.117Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 18
+<2026-07-14T10:00:30.118Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 19
+<2026-07-14T10:00:30.119Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 20
+<2026-07-14T10:00:30.120Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 21
+<2026-07-14T10:00:30.121Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 22
+<2026-07-14T10:00:30.122Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 23
+<2026-07-14T10:00:30.123Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 24
+<2026-07-14T10:00:30.124Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 25
+<2026-07-14T10:00:30.125Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 26
+<2026-07-14T10:00:30.126Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 27
+<2026-07-14T10:00:30.127Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 28
+<2026-07-14T10:00:30.128Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 29
+<2026-07-14T10:00:30.129Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 30
+<2026-07-14T10:00:30.130Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 31
+<2026-07-14T10:00:30.131Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 32
+<2026-07-14T10:00:30.132Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 33
+<2026-07-14T10:00:30.133Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 34
+<2026-07-14T10:00:30.134Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 35
+<2026-07-14T10:00:30.135Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 36
+<2026-07-14T10:00:30.136Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 37
+<2026-07-14T10:00:30.137Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 38
+<2026-07-14T10:00:30.138Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 39
+<2026-07-14T10:00:30.139Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 40
+<2026-07-14T10:00:30.140Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 41
+<2026-07-14T10:00:30.141Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 42
+<2026-07-14T10:00:30.142Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 43
+<2026-07-14T10:00:30.143Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 44
+<2026-07-14T10:00:30.144Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 45
+<2026-07-14T10:00:30.145Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 46
+<2026-07-14T10:00:30.146Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 47
+<2026-07-14T10:00:30.147Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 48
+<2026-07-14T10:00:30.148Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 49
+<2026-07-14T10:00:30.149Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 50
+<2026-07-14T10:00:30.150Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 51
+<2026-07-14T10:00:30.151Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 52
+<2026-07-14T10:00:30.152Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 53
+<2026-07-14T10:00:30.153Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 54
+<2026-07-14T10:00:30.154Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 55
+<2026-07-14T10:00:30.155Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 56
+<2026-07-14T10:00:30.156Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 57
+<2026-07-14T10:00:30.157Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 58
+<2026-07-14T10:00:30.158Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 59
+<2026-07-14T10:00:30.159Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 60
+<2026-07-14T10:00:30.160Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 61
+<2026-07-14T10:00:30.161Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 62
+<2026-07-14T10:00:30.162Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 63
+<2026-07-14T10:00:30.163Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 64
+<2026-07-14T10:00:30.164Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 65
+<2026-07-14T10:00:30.165Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 66
+<2026-07-14T10:00:30.166Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 67
+<2026-07-14T10:00:30.167Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 68
+<2026-07-14T10:00:30.168Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 69
+<2026-07-14T10:00:30.169Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 70
+<2026-07-14T10:00:30.170Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 71
+<2026-07-14T10:00:30.171Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 72
+<2026-07-14T10:00:30.172Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 73
+<2026-07-14T10:00:30.173Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 74
+<2026-07-14T10:00:30.174Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 75
+<2026-07-14T10:00:30.175Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 76
+<2026-07-14T10:00:30.176Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 77
+<2026-07-14T10:00:30.177Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 78
+<2026-07-14T10:00:30.178Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 79
+<2026-07-14T10:00:30.179Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 80
+<2026-07-14T10:00:30.180Z> [Trace] <DebugBlockSeparator> gaslight-pickup-2 81
+<2026-07-14T10:00:30.030Z> [Notice] <SHUDEvent_OnNotification> Added notification "Contract Accepted:  Junior | Stellar Small Haul | to Gaslight [50/200/250/500/1000/2000/4000 Rep | Fallow Field -> Gaslight" to queue. MissionId: [a1400003-0000-4000-8000-000000000003], ObjectiveId: [] [Team_Debug][Synthetic]
+<2026-07-14T10:00:30.040Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Collect Hydrogen from Fallow Field." to queue. MissionId: [a1400003-0000-4000-8000-000000000003], ObjectiveId: [route_pickup_03_02] [Team_Debug][Synthetic]
+<2026-07-14T10:00:30.050Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Deliver 0/0 SCU of Hydrogen to Gaslight at the L2 Lagrange of Pyro V:" to queue. MissionId: [a1400003-0000-4000-8000-000000000003], ObjectiveId: [route_pickup_03_02] [Team_Debug][Synthetic]
+<2026-07-14T10:00:31.100Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 1
+<2026-07-14T10:00:31.101Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 2
+<2026-07-14T10:00:31.102Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 3
+<2026-07-14T10:00:31.103Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 4
+<2026-07-14T10:00:31.104Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 5
+<2026-07-14T10:00:31.105Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 6
+<2026-07-14T10:00:31.106Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 7
+<2026-07-14T10:00:31.107Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 8
+<2026-07-14T10:00:31.108Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 9
+<2026-07-14T10:00:31.109Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 10
+<2026-07-14T10:00:31.110Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 11
+<2026-07-14T10:00:31.111Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 12
+<2026-07-14T10:00:31.112Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 13
+<2026-07-14T10:00:31.113Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 14
+<2026-07-14T10:00:31.114Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 15
+<2026-07-14T10:00:31.115Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 16
+<2026-07-14T10:00:31.116Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 17
+<2026-07-14T10:00:31.117Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 18
+<2026-07-14T10:00:31.118Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 19
+<2026-07-14T10:00:31.119Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 20
+<2026-07-14T10:00:31.120Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 21
+<2026-07-14T10:00:31.121Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 22
+<2026-07-14T10:00:31.122Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 23
+<2026-07-14T10:00:31.123Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 24
+<2026-07-14T10:00:31.124Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 25
+<2026-07-14T10:00:31.125Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 26
+<2026-07-14T10:00:31.126Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 27
+<2026-07-14T10:00:31.127Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 28
+<2026-07-14T10:00:31.128Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 29
+<2026-07-14T10:00:31.129Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 30
+<2026-07-14T10:00:31.130Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 31
+<2026-07-14T10:00:31.131Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 32
+<2026-07-14T10:00:31.132Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 33
+<2026-07-14T10:00:31.133Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 34
+<2026-07-14T10:00:31.134Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 35
+<2026-07-14T10:00:31.135Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 36
+<2026-07-14T10:00:31.136Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 37
+<2026-07-14T10:00:31.137Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 38
+<2026-07-14T10:00:31.138Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 39
+<2026-07-14T10:00:31.139Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 40
+<2026-07-14T10:00:31.140Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 41
+<2026-07-14T10:00:31.141Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 42
+<2026-07-14T10:00:31.142Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 43
+<2026-07-14T10:00:31.143Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 44
+<2026-07-14T10:00:31.144Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 45
+<2026-07-14T10:00:31.145Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 46
+<2026-07-14T10:00:31.146Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 47
+<2026-07-14T10:00:31.147Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 48
+<2026-07-14T10:00:31.148Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 49
+<2026-07-14T10:00:31.149Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 50
+<2026-07-14T10:00:31.150Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 51
+<2026-07-14T10:00:31.151Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 52
+<2026-07-14T10:00:31.152Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 53
+<2026-07-14T10:00:31.153Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 54
+<2026-07-14T10:00:31.154Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 55
+<2026-07-14T10:00:31.155Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 56
+<2026-07-14T10:00:31.156Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 57
+<2026-07-14T10:00:31.157Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 58
+<2026-07-14T10:00:31.158Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 59
+<2026-07-14T10:00:31.159Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 60
+<2026-07-14T10:00:31.160Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 61
+<2026-07-14T10:00:31.161Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 62
+<2026-07-14T10:00:31.162Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 63
+<2026-07-14T10:00:31.163Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 64
+<2026-07-14T10:00:31.164Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 65
+<2026-07-14T10:00:31.165Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 66
+<2026-07-14T10:00:31.166Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 67
+<2026-07-14T10:00:31.167Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 68
+<2026-07-14T10:00:31.168Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 69
+<2026-07-14T10:00:31.169Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 70
+<2026-07-14T10:00:31.170Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 71
+<2026-07-14T10:00:31.171Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 72
+<2026-07-14T10:00:31.172Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 73
+<2026-07-14T10:00:31.173Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 74
+<2026-07-14T10:00:31.174Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 75
+<2026-07-14T10:00:31.175Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 76
+<2026-07-14T10:00:31.176Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 77
+<2026-07-14T10:00:31.177Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 78
+<2026-07-14T10:00:31.178Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 79
+<2026-07-14T10:00:31.179Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 80
+<2026-07-14T10:00:31.180Z> [Trace] <DebugBlockSeparator> gaslight-pickup-3 81
+<2026-07-14T10:00:30.060Z> [Notice] <SHUDEvent_OnNotification> Added notification "Contract Accepted:  Junior | Stellar Small Haul | to Gaslight [50/200/250/500/1000/2000/4000 Rep | Ashland -> Gaslight" to queue. MissionId: [a1400003-0000-4000-8000-000000000003], ObjectiveId: [] [Team_Debug][Synthetic]
+<2026-07-14T10:00:30.070Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Collect Hydrogen from Ashland." to queue. MissionId: [a1400003-0000-4000-8000-000000000003], ObjectiveId: [route_pickup_03_03] [Team_Debug][Synthetic]
+<2026-07-14T10:00:30.080Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Deliver 0/0 SCU of Hydrogen to Gaslight at the L2 Lagrange of Pyro V:" to queue. MissionId: [a1400003-0000-4000-8000-000000000003], ObjectiveId: [route_pickup_03_03] [Team_Debug][Synthetic]
+
+<2026-07-14T10:00:40.000Z> [Notice] <SHUDEvent_OnNotification> Added notification "Contract Accepted:  Junior | Stellar Small Haul | to Endgame [50/200/250/500/1000/2000/4000 Rep | Ashland -> Endgame" to queue. MissionId: [a1400004-0000-4000-8000-000000000004], ObjectiveId: [] [Team_Debug][Synthetic]
+<2026-07-14T10:00:40.010Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Collect Quartz from Ashland." to queue. MissionId: [a1400004-0000-4000-8000-000000000004], ObjectiveId: [route_pickup_04] [Team_Debug][Synthetic]
+<2026-07-14T10:00:40.020Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Deliver 0/4 SCU of Quartz to Endgame at the L3 Lagrange of Pyro VI:" to queue. MissionId: [a1400004-0000-4000-8000-000000000004], ObjectiveId: [route_dropoff_04] [Team_Debug][Synthetic]
+
+<2026-07-14T10:00:50.000Z> [Notice] <SHUDEvent_OnNotification> Added notification "Contract Accepted:  Junior | Stellar Small Haul | to Starlight Service Station [50/200/250/500/1000/2000/4000 Rep | Canard View -> Starlight Service Station" to queue. MissionId: [a1400005-0000-4000-8000-000000000005], ObjectiveId: [] [Team_Debug][Synthetic]
+<2026-07-14T10:00:50.010Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Collect Aluminum from Canard View." to queue. MissionId: [a1400005-0000-4000-8000-000000000005], ObjectiveId: [route_pickup_05] [Team_Debug][Synthetic]
+<2026-07-14T10:00:50.020Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Deliver 0/5 SCU of Aluminum to Starlight Service Station at the L1 Lagrange of Pyro III:" to queue. MissionId: [a1400005-0000-4000-8000-000000000005], ObjectiveId: [route_dropoff_05] [Team_Debug][Synthetic]
+
+<2026-07-14T10:01:00.000Z> [Notice] <SHUDEvent_OnNotification> Added notification "Contract Accepted:  Junior | Stellar Small Haul | to Orbituary [50/200/250/500/1000/2000/4000 Rep | Gaslight -> Orbituary" to queue. MissionId: [a1400006-0000-4000-8000-000000000006], ObjectiveId: [] [Team_Debug][Synthetic]
+<2026-07-14T10:01:00.010Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Collect Potassium from Gaslight." to queue. MissionId: [a1400006-0000-4000-8000-000000000006], ObjectiveId: [route_pickup_06] [Team_Debug][Synthetic]
+<2026-07-14T10:01:00.020Z> [Notice] <SHUDEvent_OnNotification> Added notification "New Objective: Deliver 0/6 SCU of Potassium to Orbituary:" to queue. MissionId: [a1400006-0000-4000-8000-000000000006], ObjectiveId: [route_dropoff_06] [Team_Debug][Synthetic]
+
+<2026-07-14T10:01:10.000Z> [Trace] <DebugReady> Six accepted contracts; terminal mission events intentionally absent [Team_Debug][Synthetic]
+<2026-07-14T10:01:10.010Z> [Notice] <DebugContractSummary> MissionId [a1400001-0000-4000-8000-000000000001] known shared total [7 SCU]; status intentionally remains ACCEPTED
+<2026-07-14T10:01:10.020Z> [Notice] <DebugContractSummary> MissionId [a1400003-0000-4000-8000-000000000003] known shared total [9 SCU]; status intentionally remains ACCEPTED
